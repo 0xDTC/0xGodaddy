@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Load API key and secret
+# Load API key and secret from external file
 source secret.txt
 
 # Constants
@@ -11,8 +11,8 @@ TEMP_FILE="domains.json"       # Temporary file to store API response
 ALL_DOMAINS_FILE="all_domains.json"  # File to store all fetched domains
 marker=""                      # Marker for pagination, starts as an empty string
 
-# Initialize the output file
-> "$ALL_DOMAINS_FILE"  # Clear the file if it exists
+# Initialize the output file and open it as a JSON array
+echo "[" > "$ALL_DOMAINS_FILE"
 
 # Function to fetch domains from GoDaddy API using pagination
 fetch_domains() {
@@ -23,55 +23,52 @@ fetch_domains() {
         url="$API_URL?limit=$LIMIT&marker=$marker"
     fi
     
+    # Fetch data and redirect detailed output to /dev/null
     curl -s -X GET "$url" \
         -H "Authorization: sso-key $API_KEY:$API_SECRET" \
         -H "Content-Type: application/json" \
-        -H "accept: application/json" > "$TEMP_FILE"
-
-    echo "Raw response:"
-    cat "$TEMP_FILE"  # Debug: print raw response to check its structure
+        -H "accept: application/json" > "$TEMP_FILE" 2>/dev/null
 }
 
 # Loop through all pages and fetch domains
+first_page=true
 while true; do
     fetch_domains
     
-    # Check the structure of the response
-    if jq -e '.domains' "$TEMP_FILE" >/dev/null 2>&1; then
-        # If the domains field exists, append current domains to the output file
-        domain_count=$(jq '.domains | length' "$TEMP_FILE")
-        if [ "$domain_count" -gt 0 ]; then
-            jq -c '.domains[]' "$TEMP_FILE" >> "$ALL_DOMAINS_FILE"
-            echo "Fetched $domain_count domains"
-        else
-            echo "No domains found in this page. Stopping."
-            break
+    # Check if the response contains valid domain data
+    if jq -e '.[]' "$TEMP_FILE" >/dev/null 2>&1; then
+        # If it's not the first page, add a comma for proper JSON formatting
+        if [ "$first_page" = false ]; then
+            echo "," >> "$ALL_DOMAINS_FILE"
         fi
+
+        # Append the domains to the output file
+        jq -c '.[]' "$TEMP_FILE" >> "$ALL_DOMAINS_FILE"
+        first_page=false
+        echo "Fetched domains from the current page."
+
     else
-        echo "Error: Expected 'domains' field not found in response. Exiting."
+        echo "Error: No valid domain data found in response. Exiting."
         break
     fi
 
-    # Check for pagination marker
-    if jq -e '.pagination.nextMarker' "$TEMP_FILE" >/dev/null 2>&1; then
-        marker=$(jq -r '.pagination.nextMarker // empty' "$TEMP_FILE")
-        if [ -z "$marker" ]; then
-            echo "No more pages. Stopping pagination."
-            break
-        fi
-    else
-        echo "No pagination info found. Assuming no more pages."
+    # Check for the next pagination marker
+    marker=$(jq -r '.pagination.nextMarker // empty' "$TEMP_FILE" 2>/dev/null)
+
+    # If no marker exists, stop pagination
+    if [ -z "$marker" ]; then
+        echo "No more pages. Stopping pagination."
         break
     fi
 
-    # Respect rate limits by sleeping between requests
+    # Respect rate limits
     sleep "$RATE_LIMIT_DELAY"
 done
 
-# Formatting the output file
-jq -s '.' "$ALL_DOMAINS_FILE" > "cleaned_$ALL_DOMAINS_FILE"
+# Close the JSON array
+echo "]" >> "$ALL_DOMAINS_FILE"
 
 # Clean up the temporary file
 rm "$TEMP_FILE"
 
-echo "All domains have been fetched and saved to cleaned_$ALL_DOMAINS_FILE"
+echo "All domains have been fetched and saved to $ALL_DOMAINS_FILE"
