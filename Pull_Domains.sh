@@ -9,7 +9,7 @@ LIMIT=1000                     # Maximum number of domains per page
 RATE_LIMIT_DELAY=5             # Time to wait between API calls to respect rate limits
 TEMP_FILE="domains.json"       # Temporary file to store API response
 ALL_DOMAINS_FILE="all_domains.json"  # File to store all fetched domains
-marker=""                      # Marker for pagination, starts as an empty string
+marker=0                      # Marker for pagination, starts as 0
 
 # Initialize the output file and open it as a JSON array
 echo "[" > "$ALL_DOMAINS_FILE"
@@ -17,17 +17,18 @@ echo "[" > "$ALL_DOMAINS_FILE"
 # Function to fetch domains from GoDaddy API using pagination
 fetch_domains() {
     local url
-    if [ -z "$marker" ]; then
-        url="$API_URL?limit=$LIMIT"
-    else
-        url="$API_URL?limit=$LIMIT&marker=$marker"
-    fi
+    url="$API_URL?limit=$LIMIT&marker=$marker"
     
-    # Fetch data and redirect detailed output to /dev/null
+    # Fetch data and print debug information
+    echo "Fetching from URL: $url"
     curl -s -X GET "$url" \
         -H "Authorization: sso-key $API_KEY:$API_SECRET" \
         -H "Content-Type: application/json" \
-        -H "accept: application/json" > "$TEMP_FILE" 2>/dev/null
+        -H "accept: application/json" > "$TEMP_FILE"
+    
+    # Debug: print raw response to check its structure
+    echo "Raw response:"
+    cat "$TEMP_FILE"
 }
 
 # Loop through all pages and fetch domains
@@ -52,16 +53,15 @@ while true; do
         break
     fi
 
-    # Check for the next pagination marker
-    marker=$(jq -r '.pagination.nextMarker // empty' "$TEMP_FILE" 2>/dev/null)
-
-    # If no marker exists, stop pagination
-    if [ -z "$marker" ]; then
-        echo "No more pages. Stopping pagination."
+    # If the number of domains fetched is less than the limit, stop
+    domain_count=$(jq '. | length' "$TEMP_FILE")
+    if [ "$domain_count" -lt "$LIMIT" ]; then
+        echo "No more domains to fetch. Stopping pagination."
         break
     fi
 
-    # Respect rate limits
+    # Respect rate limits and increment the marker
+    marker=$((marker + LIMIT))
     sleep "$RATE_LIMIT_DELAY"
 done
 
