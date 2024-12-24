@@ -6,7 +6,8 @@ source secret.txt # Create your own secret.txt file with API_KEY and API_SECRET 
 # Variables
 PAGE_SIZE=1000
 marker=""
-output_file="domains.json"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+output_file="$script_dir/domains.json"
 
 # Initialize the output file with an empty array
 echo "[]" > "$output_file"
@@ -47,4 +48,3 @@ jq -r '.[].status' "$output_file" | sort | uniq -c | while read -r count status;
 done
 
 echo "Domains fetched successfully."
-
