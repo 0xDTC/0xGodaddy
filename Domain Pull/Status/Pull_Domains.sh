@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Load secrets
-source secret.txt
+source secret.txt # Create your own secret.txt file with API_KEY and API_SECRET variables defined in it
 
 # Variables
 PAGE_SIZE=1000
