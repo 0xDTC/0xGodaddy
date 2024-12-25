@@ -93,10 +93,6 @@ A file named `subdomains_table.md` with the formatted table.
 - **PAGE_SIZE:** Adjust the number of domains fetched per API request by modifying the `PAGE_SIZE` variable.
 - **File Paths:** Change the output file paths (`domains.json`, `subdomains.json`, `subdomains_table.md`) to suit your needs.
 
-## License
-
-This script is provided “as-is” without any warranties. You are free to modify and use it for personal or professional purposes.
-
 ## Author
 
 Created by 0xDTC. Feel free to reach out for assistance or improvements!
