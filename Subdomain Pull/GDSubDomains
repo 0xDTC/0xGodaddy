@@ -1,0 +1,98 @@
+#!/bin/bash
+
+# Load secrets
+source ../secret.txt
+
+# Variables
+PAGE_SIZE=1000
+marker=""
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+domains_file="$script_dir/domains.json"
+subdomains_file="$script_dir/subdomains.json"
+markdown_file="$script_dir/subdomains_table.md"
+
+# Initialize the output files
+: > "$domains_file"
+: > "$subdomains_file"
+
+# Fetch domains and store them in the domains file
+fetch_domains() {
+    echo "Fetching domains..."
+    while true; do
+        response=$(curl -s -X GET -H "Authorization: sso-key $API_KEY:$API_SECRET" \
+            -H "Accept: application/json" \
+            "https://api.godaddy.com/v1/domains?limit=$PAGE_SIZE&marker=$marker")
+
+        if [[ -z "$response" || "$response" == *"error"* ]]; then
+            echo "Failed to fetch domains."
+            exit 1
+        fi
+
+        jq -s '.[0] + .[1]' "$domains_file" <(echo "$response") > "${domains_file}.tmp" && mv "${domains_file}.tmp" "$domains_file"
+
+        count=$(jq 'length' <<< "$response")
+        if (( count < PAGE_SIZE )); then
+            break
+        fi
+
+        marker=$(jq -r '.[-1].domain' <<< "$response")
+    done
+
+    domain_count=$(jq 'length' "$domains_file")
+    echo "Fetched $domain_count domains."
+}
+
+# Fetch subdomains for each domain
+fetch_subdomains() {
+    domains=($(jq -r '.[].domain' "$domains_file"))
+    echo "Fetching subdomains for ${#domains[@]} domains..."
+
+    for domain in "${domains[@]}"; do
+        response=$(curl -s -X GET -H "Authorization: sso-key $API_KEY:$API_SECRET" \
+            -H "Accept: application/json" \
+            "https://api.godaddy.com/v1/domains/$domain/records")
+
+        if [[ -z "$response" || "$response" == *"code"* ]]; then
+            echo "Failed to fetch subdomains for $domain (possibly unregistered or no zone file)."
+            continue
+        fi
+
+        formatted_response=$(jq -c 'if type == "array" then . else [.] end' <<< "$response" 2>/dev/null)
+        response_with_domain=$(jq --arg domain "$domain" '[.[] | . + {domain: $domain}]' <<< "$formatted_response")
+
+        jq -s '.[0] + .[1]' "$subdomains_file" <(echo "$response_with_domain") > "${subdomains_file}.tmp" && mv "${subdomains_file}.tmp" "$subdomains_file"
+
+        echo "Fetched subdomains for $domain."
+    done
+}
+
+# Generate the markdown table
+generate_markdown() {
+    echo "# Subdomain Table" > "$markdown_file"
+    echo "" >> "$markdown_file"
+    echo "| Subdomain       | Domain            | A              | CNAME            |" >> "$markdown_file"
+    echo "|-----------------|-------------------|----------------|------------------|" >> "$markdown_file"
+
+    jq -c '.[]' "$subdomains_file" | while read -r record; do
+        subdomain=$(echo "$record" | jq -r '.name // empty')
+        domain=$(echo "$record" | jq -r '.domain // empty')
+        type=$(echo "$record" | jq -r '.type // empty')
+        value=$(echo "$record" | jq -r '.data // empty')
+
+        case "$type" in
+            A)
+                printf "| %-15s | %-17s | %-14s | %-14s |\n" "$subdomain" "$domain" "$value" "-" >> "$markdown_file"
+                ;;
+            CNAME)
+                printf "| %-15s | %-17s | %-14s | %-14s |\n" "$subdomain" "$domain" "-" "$value" >> "$markdown_file"
+                ;;
+        esac
+    done
+
+    echo "Subdomain table saved to $markdown_file."
+}
+
+# Main execution
+fetch_domains
+fetch_subdomains
+generate_markdown
