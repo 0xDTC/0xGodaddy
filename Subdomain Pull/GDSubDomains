@@ -19,9 +19,7 @@ markdown_file="$script_dir/subdomains_table.md"
 fetch_domains() {
     echo "Fetching domains..."
     while true; do
-        response=$(curl -s -X GET -H "Authorization: sso-key $API_KEY:$API_SECRET" \
-            -H "Accept: application/json" \
-            "https://api.godaddy.com/v1/domains?limit=$PAGE_SIZE&marker=$marker")
+        response=$(curl -s -X GET -H "Authorization: sso-key $API_KEY:$API_SECRET" -H "Accept: application/json" "https://api.godaddy.com/v1/domains?limit=$PAGE_SIZE&marker=$marker")
 
         if [[ -z "$response" || "$response" == *"error"* ]]; then
             echo "Failed to fetch domains."
@@ -48,9 +46,7 @@ fetch_subdomains() {
     echo "Fetching subdomains for ${#domains[@]} domains..."
 
     for domain in "${domains[@]}"; do
-        response=$(curl -s -X GET -H "Authorization: sso-key $API_KEY:$API_SECRET" \
-            -H "Accept: application/json" \
-            "https://api.godaddy.com/v1/domains/$domain/records")
+        response=$(curl -s -X GET -H "Authorization: sso-key $API_KEY:$API_SECRET" -H "Accept: application/json" "https://api.godaddy.com/v1/domains/$domain/records")
 
         if [[ -z "$response" || "$response" == *"code"* ]]; then
             echo "Failed to fetch subdomains for $domain (possibly unregistered or no zone file)."
