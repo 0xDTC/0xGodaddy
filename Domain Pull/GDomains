@@ -8,9 +8,11 @@ PAGE_SIZE=1000
 marker=""
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 output_file="$script_dir/domains.json"
+markdown_file="$script_dir/GDdomain.md"
 
 # Initialize the output file with an empty array
 echo "[]" > "$output_file"
+> "$markdown_file"
 
 while true; do
     # Fetch the domains data
@@ -38,13 +40,23 @@ while true; do
     marker=$(jq -r '.[-1].domain' <<< "$response")
 done
 
-# Print the counts directly with jq
-echo "Counts of Domains by Status:"
-echo "-----------------------------"
+# Print and write counts of statuses
+echo "Counts of Domains by Status:" | tee -a "$markdown_file"
+echo "-----------------------------" | tee -a "$markdown_file"
 
-# Extract all unique statuses and count them
 jq -r '.[].status' "$output_file" | sort | uniq -c | while read -r count status; do
-    printf "%-25s: %d\n" "$status" "$count"
+    printf "%-25s: %d\n" "$status" "$count" | tee -a "$markdown_file"
 done
 
-echo "Domains fetched successfully."
+# Print and write table of domains with statuses
+echo -e "\nDomains and Their Statuses:" | tee -a "$markdown_file"
+echo "---------------------------------------" | tee -a "$markdown_file"
+printf "%-40s | %-20s\n" "Domain" "Status" | tee -a "$markdown_file"
+printf "%-40s | %-20s\n" "---------------------------------------" "--------------------" | tee -a "$markdown_file"
+
+jq -r '.[] | [.domain, .status] | @tsv' "$output_file" | while IFS=$'\t' read -r domain status; do
+    printf "%-40s | %-20s\n" "$domain" "$status" | tee -a "$markdown_file"
+done
+
+# Delete the .json file
+rm -f "$output_file"
