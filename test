@@ -1,0 +1,18 @@
+#!/bin/bash
+
+# Load secrets
+source secret.txt
+
+# Check if the domain is registered in the account
+DOMAIN="monotype.com"
+
+echo "Checking domain status for $DOMAIN..."
+response=$(curl -s -X GET -H "Authorization: sso-key $API_KEY:$API_SECRET" -H "Accept: application/json" "https://api.godaddy.com/v1/domains/$DOMAIN")
+
+if echo "$response" | grep -q '"code":"UNKNOWN_DOMAIN"'; then
+    echo "The domain $DOMAIN is not registered in your GoDaddy account or does not have a zone file."
+    exit 1
+else
+    echo "Fetching DNS records for $DOMAIN..."
+    curl -s -X GET -H "Authorization: sso-key $API_KEY:$API_SECRET" -H "Accept: application/json" "https://api.godaddy.com/v1/domains/$DOMAIN/records" | jq
+fi
