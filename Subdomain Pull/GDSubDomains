@@ -1,7 +1,17 @@
 #!/bin/bash
 
 # Load secrets
+if [[ ! -f ../secret.txt ]]; then
+    echo "Error: Secrets file (../secret.txt) not found. Please create it with required credentials."
+    exit 1
+fi
 source ../secret.txt
+
+# Check if required variables are set
+if [[ -z "$GODADDY_API_KEY" || -z "$GODADDY_API_SECRET" || -z "$CLOUDFLARE_API_TOKEN" ]]; then
+    echo "Error: Missing GODADDY_API_KEY, GODADDY_API_SECRET, or CLOUDFLARE_API_TOKEN in secret.txt."
+    exit 1
+fi
 
 # Variables
 PAGE_SIZE=1000
@@ -9,20 +19,24 @@ marker=""
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 domains_file="$script_dir/domains.json"
 subdomains_file="$script_dir/subdomains.json"
+cloudflare_check_file="$script_dir/cloudflare_check.json"
 markdown_file="$script_dir/subdomains_table.md"
+no_dns_file="$script_dir/no_dns_domains.txt"
 
 # Initialize the output files
-: > "$domains_file"
-: > "$subdomains_file"
+: > "$domains_file" || { echo "Error: Unable to initialize $domains_file"; exit 1; }
+: > "$subdomains_file" || { echo "Error: Unable to initialize $subdomains_file"; exit 1; }
+: > "$cloudflare_check_file" || { echo "Error: Unable to initialize $cloudflare_check_file"; exit 1; }
+: > "$no_dns_file" || { echo "Error: Unable to initialize $no_dns_file"; exit 1; }
 
-# Fetch domains and store them in the domains file
+# Fetch active domains from GoDaddy
 fetch_domains() {
-    echo "Fetching domains..."
+    echo "Fetching active domains from GoDaddy..."
     while true; do
-        response=$(curl -s -X GET -H "Authorization: sso-key $API_KEY:$API_SECRET" -H "Accept: application/json" "https://api.godaddy.com/v1/domains?limit=$PAGE_SIZE&marker=$marker")
+        response=$(curl -s -X GET -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" -H "Accept: application/json" "https://api.godaddy.com/v1/domains?limit=$PAGE_SIZE&marker=$marker")
 
-        if [[ -z "$response" || "$response" == *"error"* ]]; then
-            echo "Failed to fetch domains."
+        if [[ $? -ne 0 || -z "$response" || "$response" == *"error"* ]]; then
+            echo "Error: Failed to fetch domains from GoDaddy. Please check your API credentials or network connection."
             exit 1
         fi
 
@@ -36,51 +50,106 @@ fetch_domains() {
         marker=$(jq -r '.[-1].domain' <<< "$response")
     done
 
+    jq '[.[] | select(.status == "ACTIVE") | {domain: .domain, status: .status}]' "$domains_file" > "${domains_file}.active"
+    mv "${domains_file}.active" "$domains_file"
+
     domain_count=$(jq 'length' "$domains_file")
-    echo "Fetched $domain_count domains."
+    if [[ $domain_count -eq 0 ]]; then
+        echo "Error: No active domains found on GoDaddy."
+        exit 1
+    fi
+    echo "Fetched $domain_count active domains from GoDaddy."
 }
 
-# Fetch subdomains for each domain
+# Fetch subdomains from GoDaddy
 fetch_subdomains() {
     domains=($(jq -r '.[].domain' "$domains_file"))
-    echo "Fetching subdomains for ${#domains[@]} domains..."
+    echo "Fetching subdomains for ${#domains[@]} active domains..."
 
     for domain in "${domains[@]}"; do
-        response=$(curl -s -X GET -H "Authorization: sso-key $API_KEY:$API_SECRET" -H "Accept: application/json" "https://api.godaddy.com/v1/domains/$domain/records")
+        echo "Checking subdomains for $domain on GoDaddy..."
+        response=$(curl -s -X GET -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" -H "Accept: application/json" "https://api.godaddy.com/v1/domains/$domain/records")
 
-        if [[ -z "$response" || "$response" == *"code"* ]]; then
-            echo "Failed to fetch subdomains for $domain (possibly unregistered or no zone file)."
+        if [[ $? -ne 0 || -z "$response" || "$response" == *"code"* ]]; then
+            echo "Warning: No subdomains found on GoDaddy or error occurred for $domain."
+            fetch_subdomains_cloudflare "$domain"
             continue
         fi
 
         formatted_response=$(jq -c 'if type == "array" then . else [.] end' <<< "$response" 2>/dev/null)
-        response_with_domain=$(jq --arg domain "$domain" '[.[] | . + {domain: $domain}]' <<< "$formatted_response")
+        response_with_domain=$(jq --arg domain "$domain" '[.[] | . + {domain: $domain, source: "GoDaddy"}]' <<< "$formatted_response")
 
         jq -s '.[0] + .[1]' "$subdomains_file" <(echo "$response_with_domain") > "${subdomains_file}.tmp" && mv "${subdomains_file}.tmp" "$subdomains_file"
 
-        echo "Fetched subdomains for $domain."
+        echo "Fetched subdomains for $domain from GoDaddy."
     done
+}
+
+# Fetch subdomains from Cloudflare
+fetch_subdomains_cloudflare() {
+    local domain=$1
+    echo "Checking subdomains for $domain on Cloudflare..."
+
+    zone_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$domain" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+        -H "Content-Type: application/json" | jq -r '.result[0].id')
+
+    if [[ $? -ne 0 || -z "$zone_id" || "$zone_id" == "null" ]]; then
+        echo "Warning: No Cloudflare zone found for $domain."
+        return
+    fi
+
+    response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+        -H "Content-Type: application/json")
+
+    if [[ $? -ne 0 || -z "$response" || "$response" == *"errors"* ]]; then
+        echo "Warning: Failed to fetch subdomains for $domain on Cloudflare. Possible reasons: invalid API token, rate limiting, or API issue."
+        return
+    fi
+
+    formatted_response=$(jq --arg domain "$domain" '[.result[] | {name: .name, type: .type, data: .content, domain: $domain, source: "Cloudflare"}]' <<< "$response")
+    jq -s '.[0] + .[1]' "$cloudflare_check_file" <(echo "$formatted_response") > "${cloudflare_check_file}.tmp" && mv "${cloudflare_check_file}.tmp" "$cloudflare_check_file"
+
+    echo "Fetched subdomains for $domain from Cloudflare."
+}
+
+# Identify domains with no DNS records
+identify_no_dns_domains() {
+    active_domains=($(jq -r '.[].domain' "$domains_file"))
+    domains_with_dns=($(jq -r '.[].domain' "$subdomains_file" "$cloudflare_check_file" | sort -u))
+
+    echo "Checking for domains with no DNS records on both GoDaddy and Cloudflare..."
+    for domain in "${active_domains[@]}"; do
+        if [[ ! " ${domains_with_dns[@]} " =~ " $domain " ]]; then
+            echo "$domain" >> "$no_dns_file"
+        fi
+    done
+
+    no_dns_count=$(wc -l < "$no_dns_file")
+    echo "Found $no_dns_count domains with no DNS records."
 }
 
 # Generate the markdown table
 generate_markdown() {
     echo "# Subdomain Table" > "$markdown_file"
     echo "" >> "$markdown_file"
-    echo "| Subdomain       | Domain            | A              | CNAME            |" >> "$markdown_file"
-    echo "|-----------------|-------------------|----------------|------------------|" >> "$markdown_file"
+    echo "| Subdomain       | Domain            | A              | CNAME            | Source        |" >> "$markdown_file"
+    echo "|-----------------|-------------------|----------------|------------------|---------------|" >> "$markdown_file"
 
-    jq -c '.[]' "$subdomains_file" | while read -r record; do
+    jq -c '.[]' "$subdomains_file" "$cloudflare_check_file" | while read -r record; do
         subdomain=$(echo "$record" | jq -r '.name // empty')
         domain=$(echo "$record" | jq -r '.domain // empty')
         type=$(echo "$record" | jq -r '.type // empty')
         value=$(echo "$record" | jq -r '.data // empty')
+        source=$(echo "$record" | jq -r '.source // empty')
 
         case "$type" in
             A)
-                printf "| %-15s | %-17s | %-14s | %-14s |\n" "$subdomain" "$domain" "$value" "-" >> "$markdown_file"
+                printf "| %-15s | %-17s | %-14s | %-14s | %-13s |\n" "$subdomain" "$domain" "$value" "-" "$source" >> "$markdown_file"
                 ;;
             CNAME)
-                printf "| %-15s | %-17s | %-14s | %-14s |\n" "$subdomain" "$domain" "-" "$value" >> "$markdown_file"
+                printf "| %-15s | %-17s | %-14s | %-14s | %-13s |\n" "$subdomain" "$domain" "-" "$value" "$source" >> "$markdown_file"
                 ;;
         esac
     done
@@ -91,4 +160,13 @@ generate_markdown() {
 # Main execution
 fetch_domains
 fetch_subdomains
+identify_no_dns_domains
 generate_markdown
+
+# Output domains with no DNS records
+if [[ -s "$no_dns_file" ]]; then
+    echo "Domains with no DNS records (saved to $no_dns_file):"
+    cat "$no_dns_file"
+else
+    echo "All domains have DNS records on at least one platform."
+fi
