@@ -1,3 +1,5 @@
+<a href="https://www.buymeacoffee.com/0xDTC"><img src="https://img.buymeacoffee.com/button-api/?text=Buy me a knowledge&emoji=📖&slug=0xDTC&button_colour=FF5F5F&font_colour=ffffff&font_family=Comic&outline_colour=000000&coffee_colour=FFDD00" /></a>
+
 # Subdomain Table Generator
 
 This script automates the process of fetching domain and subdomain information from the GoDaddy API and generates a Markdown table containing the subdomain details, including DNS records.
