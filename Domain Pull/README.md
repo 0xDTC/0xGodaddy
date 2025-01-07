@@ -1,3 +1,5 @@
+<a href="https://www.buymeacoffee.com/0xDTC"><img src="https://img.buymeacoffee.com/button-api/?text=Buy me a knowledge&emoji=📖&slug=0xDTC&button_colour=FF5F5F&font_colour=ffffff&font_family=Comic&outline_colour=000000&coffee_colour=FFDD00" /></a>
+___
 # Domain Fetch Script by **0xDTC**
 
 This script, developed by 0xDTC, fetches domain data from the GoDaddy API and aggregates it into a single JSON file. It dynamically identifies and counts all domain statuses, ensuring flexibility for future additions.
