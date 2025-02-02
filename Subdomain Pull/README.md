@@ -22,9 +22,9 @@ Automates domain and subdomain retrieval from GoDaddy and Cloudflare, then gener
 
 ## Installation
 1. Clone the repo:  
-     git clone https://github.com/yourusername/demo-subdomain-table-generator.git  
-2. cd demo-subdomain-table-generator  
-3. chmod +x GDSubDomains.sh  
+     git clone https://github.com/0xdtc/0xGodaddy.git  
+2. cd '0xGodaddy/Subdomain Pull'
+3. chmod +x GDSubDomains.sh 
 
 ## Usage
 ./GDSubDomains.sh [-l]  
@@ -57,9 +57,6 @@ Automates domain and subdomain retrieval from GoDaddy and Cloudflare, then gener
 - Check credentials in secret.txt.
 - Ensure jq is installed and in PATH.
 - Use -l flag for logs in script_debug.log.
-
-## License
-MIT
 
 ## Support
 Open an issue or buy me a coffee at the link above.
