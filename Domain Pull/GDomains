@@ -16,7 +16,7 @@ echo "[]" > "$output_file"
 
 while true; do
     # Fetch the domains data
-    response=$(curl -s -X GET -H "Authorization: sso-key $API_KEY:$API_SECRET" -H "Accept: application/json" "https://api.godaddy.com/v1/domains?limit=$PAGE_SIZE&marker=$marker")
+    response=$(curl -s -X GET -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" -H "Accept: application/json" "https://api.godaddy.com/v1/domains?limit=$PAGE_SIZE&marker=$marker")
 
     # Check if the response is empty
     if [[ -z "$response" ]]; then
