@@ -2,99 +2,64 @@
 
 # Subdomain Table Generator
 
-This script automates the process of fetching domain and subdomain information from the GoDaddy API and generates a Markdown table containing the subdomain details, including DNS records.
+Automates domain and subdomain retrieval from GoDaddy and Cloudflare, then generates a sorted Markdown table.
 
 ## Features
-
-1. **Domain Fetching:** Retrieves all domains associated with the provided GoDaddy API credentials.
-2. **Subdomain Retrieval:** Fetches DNS records for each domain, including A and CNAME records.
-3. **Markdown Table Generation:** Outputs the subdomain data in a clean, readable Markdown table format.
+- Fetch domains (with pagination).
+- Retrieve DNS records (A, CNAME, etc.) from GoDaddy and Cloudflare.
+- Group and sort records by domain and subdomain.
+- Generate a clean Markdown table.
+- Optional logging, error handling, and cleanup.
 
 ## Prerequisites
-
-1. **Bash Shell:** Ensure you have Bash installed (available on Linux/macOS/WSL on Windows).
-2. **GoDaddy API Credentials:**
-    - Obtain your API Key and Secret from the GoDaddy Developer Portal.
-    - Save the credentials in a `secret.txt` file located in the parent directory of the script.
-    
-    ```bash
-    API_KEY="your_api_key"
-    API_SECRET="your_api_secret"
-    ```
-3. **jq:**
-    - Required for parsing JSON responses.
-    - Install it using:
-      ```bash
-      sudo apt install jq        # Debian/Ubuntu
-      brew install jq            # macOS
-      sudo yum install jq        # Red Hat/CentOS
-      ```
+- Bash shell (Linux, macOS, or WSL).
+- jq (for JSON parsing).  
+    • Debian/Ubuntu: sudo apt install jq  
+    • macOS: brew install jq  
+    • Red Hat/CentOS: sudo yum install jq  
+- GoDaddy API key/secret (saved in secret.txt).
+- Cloudflare API token (saved in secret.txt).
 
 ## Installation
-
-1. Clone or download this script into a directory of your choice.
-2. Ensure the script is executable:
-    ```bash
-    chmod +x script_name.sh
-    ```
+1. Clone the repo:  
+     git clone https://github.com/yourusername/demo-subdomain-table-generator.git  
+2. cd demo-subdomain-table-generator  
+3. chmod +x GDSubDomains.sh  
 
 ## Usage
+./GDSubDomains.sh [-l]  
+(-l enables logging; default logs to /dev/null.)
 
-1. Run the script:
-    ```bash
-    ./script_name.sh
-    ```
-2. The script will:
-    - Fetch all domains.
-    - Retrieve DNS records for each domain.
-    - Generate a Markdown table of subdomains and save it to `subdomains_table.md`.
+## What the Script Does
+1. Fetch domains from GoDaddy.  
+2. Fetch subdomain DNS records from GoDaddy and Cloudflare.  
+3. Merge and sort results into final_subdomains.json.  
+4. Generate subdomains_table.md organized by domain and subdomain.  
+5. Clean up temporary files.
 
-## Output
-
-The output file `subdomains_table.md` will have the following structure:
-
-# Subdomain Table
-
-| Subdomain | Domain      | A          | CNAME            |
-|-----------|-------------|------------|------------------|
-| @         | example.com | 192.0.2.1  | -                |
-| www       | example.com | -          | @                |
-| ftp       | example.com | 192.0.2.2  | -                |
-| mail      | example.com | -          | mail.example.com |
-
-## How It Works
-
-1. **Fetch Domains:**
-    - Uses the GoDaddy API to retrieve a list of domains associated with the API credentials.
-    - Handles pagination to ensure all domains are fetched.
-2. **Fetch Subdomains:**
-    - Retrieves DNS records (A and CNAME) for each domain.
-    - Adds the corresponding domain name to each subdomain record for clarity.
-3. **Generate Markdown Table:**
-    - Formats the subdomain data into a Markdown table for easy readability.
-
-## Error Handling
-
-- **Failed API Requests:**
-  - Logs a failure message for domains or subdomains that cannot be fetched.
-- **Malformed Responses:**
-  - Ensures malformed JSON responses do not crash the script by wrapping objects into arrays when necessary.
-
-## Example
-
-**Command:**
-```bash
-./script_name.sh
-```
-
-**Output:**
-A file named `subdomains_table.md` with the formatted table.
+## Demo Output
+| Subdomain | Domain      | Type  | Data              | Source     |
+|-----------|------------ |-------|-------------------|------------|
+| blog      | demo.com    | A     | 192.0.2.10        | GoDaddy    |
+| mail      | demo.com    | A     | 192.0.2.20        | Cloudflare |
+| shop      | demo.com    | CNAME | shop.demo.net     | Cloudflare |
+| www       | demo.com    | CNAME | demo.com          | GoDaddy    |
+| api       | sample.org  | A     | 203.0.113.5       | GoDaddy    |
+| ftp       | sample.org  | A     | 203.0.113.15      | Cloudflare |
+| app       | sample.org  | CNAME | app.sample.net    | Cloudflare |
+| www       | sample.org  | CNAME | sample.org        | GoDaddy    |
 
 ## Customization
+- Adjust PAGE_SIZE in the script for domain fetch size.
+- Modify file paths as needed.
 
-- **PAGE_SIZE:** Adjust the number of domains fetched per API request by modifying the `PAGE_SIZE` variable.
-- **File Paths:** Change the output file paths (`domains.json`, `subdomains.json`, `subdomains_table.md`) to suit your needs.
+## Troubleshooting
+- Check credentials in secret.txt.
+- Ensure jq is installed and in PATH.
+- Use -l flag for logs in script_debug.log.
 
-## Author
+## License
+MIT
 
-Created by 0xDTC. Feel free to reach out for assistance or improvements!
+## Support
+Open an issue or buy me a coffee at the link above.
