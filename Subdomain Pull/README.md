@@ -1,62 +1,86 @@
 <a href="https://www.buymeacoffee.com/0xDTC"><img src="https://img.buymeacoffee.com/button-api/?text=Buy me a knowledge&emoji=📖&slug=0xDTC&button_colour=FF5F5F&font_colour=ffffff&font_family=Comic&outline_colour=000000&coffee_colour=FFDD00" /></a>
 
-# Subdomain Table Generator
+# Organization Assets Generator
 
-Automates domain and subdomain retrieval from GoDaddy and Cloudflare, then generates a sorted Markdown table.
+Automates domain and subdomain retrieval from GoDaddy and Cloudflare, then generates comprehensive asset documentation in both Markdown and HTML formats.
 
 ## Features
-- Fetch domains (with pagination).
-- Retrieve DNS records (A, CNAME, etc.) from GoDaddy and Cloudflare.
-- Group and sort records by domain and subdomain.
-- Generate a clean Markdown table.
-- Optional logging, error handling, and cleanup.
+- Fetch domains from GoDaddy API with pagination
+- Retrieve DNS records (A, CNAME, TXT, etc.) from GoDaddy and Cloudflare
+- Cache Cloudflare zones for one week to reduce API calls
+- Group and sort records by domain and subdomain
+- Track discovery dates for all assets
+- Generate interactive HTML report with filtering and sorting
+- Generate clean Markdown table output
+- Handle API quota limits gracefully
+- Optional logging for debugging
 
 ## Prerequisites
-- Bash shell (Linux, macOS, or WSL).
-- jq (for JSON parsing).  
-    • Debian/Ubuntu: sudo apt install jq  
-    • macOS: brew install jq  
-    • Red Hat/CentOS: sudo yum install jq  
-- GoDaddy API key/secret (saved in secret.txt).
-- Cloudflare API token (saved in secret.txt).
+- Bash shell (Linux, macOS, or WSL)
+- jq (for JSON parsing)  
+    • Debian/Ubuntu: `sudo apt install jq`  
+    • macOS: `brew install jq`  
+    • Red Hat/CentOS: `sudo yum install jq`  
+- GoDaddy API key/secret (saved in secret.txt)
+- Cloudflare API token (saved in secret.txt)
 
 ## Installation
 1. Clone the repo:  
-     git clone https://github.com/0xdtc/0xGodaddy.git  
-2. cd '0xGodaddy/Subdomain Pull'
-3. chmod +x GDSubDomains.sh 
+     `git clone https://github.com/0xdtc/0xGodaddy.git`  
+2. `cd '0xGodaddy/Subdomain Pull'`
+3. `chmod +x GDSubDomains` 
 
 ## Usage
-./GDSubDomains.sh [-l]  
-(-l enables logging; default logs to /dev/null.)
+```
+./GDSubDomains [-l]
+```
+(-l enables logging to script_debug.log; default logs to /dev/null)
 
 ## What the Script Does
-1. Fetch domains from GoDaddy.  
-2. Fetch subdomain DNS records from GoDaddy and Cloudflare.  
-3. Merge and sort results into final_subdomains.json.  
-4. Generate subdomains_table.md organized by domain and subdomain.  
-5. Clean up temporary files.
+1. Fetch domains from GoDaddy (with quota awareness)
+2. Fetch and cache Cloudflare zones (refreshed weekly)
+3. Retrieve subdomain DNS records from both GoDaddy and Cloudflare
+4. Add discovery dates to all assets
+5. Merge and sort results into org_assets.json
+6. Generate Org-Assets.md for a simple table view
+7. Generate Org-Assets.html with interactive features:
+   - Sortable columns
+   - Search/filter functionality
+   - Responsive design
+   - CSV export
+   - Collapsible long entries
 
-## Demo Output
-| Subdomain | Domain      | Type  | Data              | Source     |
-|-----------|------------ |-------|-------------------|------------|
-| blog      | demo.com    | A     | 192.0.2.10        | GoDaddy    |
-| mail      | demo.com    | A     | 192.0.2.20        | Cloudflare |
-| shop      | demo.com    | CNAME | shop.demo.net     | Cloudflare |
-| www       | demo.com    | CNAME | demo.com          | GoDaddy    |
-| api       | sample.org  | A     | 203.0.113.5       | GoDaddy    |
-| ftp       | sample.org  | A     | 203.0.113.15      | Cloudflare |
-| app       | sample.org  | CNAME | app.sample.net    | Cloudflare |
-| www       | sample.org  | CNAME | sample.org        | GoDaddy    |
+## Output Files
+- `godaddy_assets.json`: Assets from GoDaddy
+- `cloudflare_assets.json`: Assets from Cloudflare
+- `org_assets.json`: Combined assets from both providers
+- `Org-Assets.md`: Markdown table documentation
+- `Org-Assets.html`: Interactive HTML documentation
+- `cloudflare_zones_cache.json`: Cached Cloudflare zones (refreshed weekly)
+
+## Demo Output (Markdown Format)
+| Domain | Subdomain | Type | Data | Source | Discovery Date |
+|--------|-----------|------|------|--------|----------------|
+| demo.com | @ | A | 192.0.2.1 | GoDaddy | 2025-04-12 |
+| demo.com | blog | CNAME | blog.example.net | GoDaddy | 2025-04-12 |
+| demo.com | mail | MX | mail.example.net | Cloudflare | 2025-04-12 |
+| demo.com | www | CNAME | demo.com | GoDaddy | 2025-04-12 |
+| sample.org | @ | A | 203.0.113.5 | Cloudflare | 2025-04-12 |
+| sample.org | api | A | 203.0.113.10 | GoDaddy | 2025-04-12 |
+| sample.org | app | CNAME | app.example.com | Cloudflare | 2025-04-12 |
+| sample.org | www | CNAME | sample.org | GoDaddy | 2025-04-12 |
 
 ## Customization
-- Adjust PAGE_SIZE in the script for domain fetch size.
-- Modify file paths as needed.
+- Adjust PAGE_SIZE in the script for domain fetch size
+- Modify the Cloudflare zone cache duration (default is 7 days)
+- Customize HTML styling in the generate_asset_documentation function
 
 ## Troubleshooting
-- Check credentials in secret.txt.
-- Ensure jq is installed and in PATH.
-- Use -l flag for logs in script_debug.log.
+- Check credentials in ../secret.txt
+- Ensure jq is installed and in PATH
+- Use -l flag for detailed logs in script_debug.log
+- If GoDaddy API quota is exceeded, the script will continue with Cloudflare assets only
+- For HTML rendering issues, check browser console for JavaScript errors
 
 ## Support
 Open an issue or buy me a coffee at the link above.

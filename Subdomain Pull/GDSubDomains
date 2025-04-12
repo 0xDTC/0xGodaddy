@@ -18,7 +18,7 @@ while getopts ":l" opt; do
   esac
 done
 
-# Set log file path based on flag; if logging disabled, send logs to /dev/null
+# Set up logging
 if $LOG_ENABLED; then
     log_file="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/script_debug.log"
 else
@@ -43,217 +43,1020 @@ fi
 # Variable Setup    #
 #####################
 PAGE_SIZE=1000
-marker=""
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-domains_file="$script_dir/domains.json"
-godaddy_file="$script_dir/godaddy_subdomains.json"
-cloudflare_file="$script_dir/cloudflare_subdomains.json"
-final_file="$script_dir/final_subdomains.json"
-no_dns_file="$script_dir/no_dns_domains.txt"
-markdown_file="$script_dir/subdomains_table.md"
+today_date=$(date +%Y-%m-%d)
 
-# Initialize log and output files
+# Output files
+godaddy_file="$script_dir/godaddy_assets.json"
+cloudflare_file="$script_dir/cloudflare_assets.json"
+merged_file="$script_dir/org_assets.json"
+markdown_file="$script_dir/Org-Assets.md"
+html_file="$script_dir/Org-Assets.html"
+# Cloudflare zone cache file
+cloudflare_zones_cache="$script_dir/cloudflare_zones_cache.json"
+
+# Initialize logs
 echo "Script Execution Started: $(date)" > "$log_file"
-: > "$domains_file"
-: > "$godaddy_file"
-: > "$cloudflare_file"
-: > "$no_dns_file"
 
-#############################
-# Function Definitions      #
-#############################
-
-# Fetch active domains from GoDaddy
-fetch_domains() {
-    echo "Fetching active domains from GoDaddy..." | tee -a "$log_file"
-    while true; do
-        response=$(curl -s -X GET \
-            -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
-            -H "Accept: application/json" \
-            "https://api.godaddy.com/v1/domains?limit=$PAGE_SIZE&marker=$marker")
-        echo "Raw GoDaddy API Response: $response" >> "$log_file"
-        
-        if [[ $? -ne 0 || -z "$response" ]]; then
-            echo "Error: Empty or failed response from GoDaddy API." | tee -a "$log_file"
-            exit 1
-        fi
-
-        if ! echo "$response" | jq empty 2>/dev/null; then
-            echo "Error: Invalid JSON received: $response" | tee -a "$log_file"
-            exit 1
-        fi
-
-        if [[ "$response" == *"error"* || "$response" == *"Invalid"* || "$response" == *"Unauthorized"* ]]; then
-            echo "Error: API returned an error – check credentials/permissions." | tee -a "$log_file"
-            exit 1
-        fi
-
-        jq -s '.[0] + .[1]' "$domains_file" <(echo "$response") > "${domains_file}.tmp" && mv "${domains_file}.tmp" "$domains_file"
-        
-        count=$(jq 'length' <<< "$response")
-        if (( count < PAGE_SIZE )); then
-            break
-        fi
-
-        marker=$(jq -r '.[-1].domain' <<< "$response")
-    done
-
-    jq '[.[] | select(.status == "ACTIVE") | {domain: .domain, status: .status}]' "$domains_file" > "${domains_file}.active"
-    mv "${domains_file}.active" "$domains_file"
-
-    domain_count=$(jq 'length' "$domains_file")
-    if [[ $domain_count -eq 0 ]]; then
-        echo "Error: No active domains found on GoDaddy." | tee -a "$log_file"
-        exit 1
-    fi
-
-    echo "Fetched $domain_count active domains from GoDaddy." | tee -a "$log_file"
+#####################
+# Helper Functions  #
+#####################
+log_message() {
+    echo "$1" | tee -a "$log_file"
 }
 
-# Fetch subdomains from GoDaddy for a given domain
-fetch_godaddy_subdomains() {
-    local domain=$1
-    echo "Fetching GoDaddy subdomains for $domain..." | tee -a "$log_file"
+# Check API connectivity for both providers
+check_api_connectivity() {
+    log_message "Checking API connectivity..."
+    
+    # Check GoDaddy API
+    log_message "Checking GoDaddy API connectivity..."
+    local godaddy_check
+    godaddy_check=$(curl -s -X GET \
+        -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
+        -H "Accept: application/json" \
+        "https://api.godaddy.com/v1/domains/available?domain=test-connectivity-check.com")
+    
+    if [[ $? -ne 0 || -z "$godaddy_check" ]]; then
+        log_message "Error: Failed to connect to GoDaddy API. Check your network connection."
+        return 1
+    fi
+    
+    if ! echo "$godaddy_check" | jq empty &>/dev/null; then
+        log_message "Error: Invalid response from GoDaddy API. Check credentials."
+        return 1
+    fi
+    
+    # Check for quota issues
+    if echo "$godaddy_check" | grep -q "QUOTA_EXCEEDED"; then
+        log_message "Warning: GoDaddy API quota already exceeded before script execution."
+        log_message "  - Error: $(echo "$godaddy_check" | grep -o 'QUOTA_EXCEEDED.*')"
+    else
+        log_message "GoDaddy API connection successful."
+    fi
+    
+    # Check Cloudflare API
+    log_message "Checking Cloudflare API connectivity..."
+    local cloudflare_check
+    cloudflare_check=$(curl -s -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+    
+    if [[ $? -ne 0 || -z "$cloudflare_check" ]]; then
+        log_message "Error: Failed to connect to Cloudflare API. Check your network connection."
+        return 1
+    fi
+    
+    if ! echo "$cloudflare_check" | jq -e '.success' &>/dev/null; then
+        log_message "Error: Invalid or unauthorized Cloudflare API token. Check credentials."
+        return 1
+    fi
+    
+    log_message "Cloudflare API connection successful."
+    
+    return 0
+}
+
+# Ensure a file is a valid JSON array
+ensure_json_array() {
+    local file="$1"
+    if [[ ! -s "$file" ]]; then
+        echo "[]" > "$file"
+        return
+    fi
+    if ! jq empty "$file" 2>/dev/null; then
+        log_message "Warning: $file is invalid JSON; resetting to []."
+        echo "[]" > "$file"
+        return
+    fi
+    if ! jq -e 'if type=="array" then true else false end' "$file" &>/dev/null; then
+        log_message "Warning: $file is JSON but not an array; converting to []."
+        echo "[]" > "$file"
+    fi
+}
+
+# Merge two JSON array files
+merge_json_files() {
+    local in1="$1"
+    local in2="$2"
+    local out="$3"
+    ensure_json_array "$in1"
+    ensure_json_array "$in2"
+    if ! jq -s '.[0] + .[1]' "$in1" "$in2" > "${out}.tmp" 2>/dev/null; then
+        log_message "Warning: merging $in1 and $in2 failed, defaulting to []."
+        echo "[]" > "$out"
+    else
+        mv "${out}.tmp" "$out"
+        ensure_json_array "$out"
+    fi
+}
+
+#####################
+# API Functions     #
+#####################
+
+# Format DNS records from GoDaddy response
+format_godaddy_records() {
+    local response="$1"
+    local domain="$2"
+    local today="$3"
+    
+    if [[ -z "$response" ]]; then
+        echo "[]"
+        return
+    fi
+    
+    # Check if response is valid JSON
+    if ! echo "$response" | jq empty 2>/dev/null; then
+        echo "[]"
+        return
+    fi
+    
+    # Transform the records into our desired format
+    echo "$response" | jq --arg domain "$domain" --arg today "$today" '
+        if type == "array" then
+            map({
+                name: (.name // "@"),
+                type: (.type // "UNKNOWN"),
+                data: (.data // .value // "N/A"),
+                domain: $domain,
+                source: "GoDaddy",
+                discovery_date: $today
+            })
+        else
+            []
+        end'
+}
+
+# Format DNS records from Cloudflare response
+format_cloudflare_records() {
+    local response="$1"
+    local domain="$2"
+    local today="$3"
+    
+    if [[ -z "$response" ]]; then
+        echo "[]"
+        return
+    fi
+    
+    # Check if response is valid JSON
+    if ! echo "$response" | jq empty 2>/dev/null; then
+        echo "[]"
+        return
+    fi
+    
+    # Transform the records into our desired format
+    echo "$response" | jq --arg domain "$domain" --arg today "$today" '
+        if (.result != null and (.result | type) == "array") then
+            .result | map({
+                name: (.name // "@"),
+                type: (.type // "UNKNOWN"),
+                data: (.content // "N/A"),
+                domain: $domain,
+                source: "Cloudflare",
+                discovery_date: $today
+            })
+        else
+            []
+        end'
+}
+
+# Fetch domains and subdomains from GoDaddy
+fetch_godaddy_assets() {
+    log_message "Fetching assets from GoDaddy..."
+    local domains=()
+    local domains_json="[]"
+    local quota_exceeded=false
+    local quota_error_message=""
+    
+    # Hard-code a few important domains if the API doesn't return anything
+    # This serves as a fallback in case the GoDaddy API domain list is restricted
+    read -r -d '' IMPORTANT_DOMAINS << EOL
+typographyincorporated.com
+berhold.com
+bertholdtypes.com
+bertholdtypegroup.com
+EOL
+
+    # First attempt: Use the domains API
+    local response
     response=$(curl -s -X GET \
         -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
         -H "Accept: application/json" \
-        "https://api.godaddy.com/v1/domains/$domain/records")
-    echo "GoDaddy Subdomain Response for $domain: $response" >> "$log_file"
-
-    if [[ -z "$response" || "$response" == *"code"* ]]; then
-        echo "Warning: No subdomains found for $domain on GoDaddy." | tee -a "$log_file"
-        return
-    fi
-
-    formatted=$(jq -c 'if type=="array" then . else [.] end' <<< "$response" 2>/dev/null)
-    result=$(jq --arg domain "$domain" '[.[] + {domain: $domain, source: "GoDaddy"}]' <<< "$formatted")
+        "https://api.godaddy.com/v1/domains?statuses=ACTIVE&limit=1000")
     
-    if [[ -s "$godaddy_file" ]]; then
-        merged=$(jq -s '.[0] + .[1]' "$godaddy_file" <(echo "$result"))
+    # Check if we hit the API quota limit
+    if echo "$response" | grep -q "QUOTA_EXCEEDED"; then
+        quota_error_message=$(echo "$response" | grep -o 'QUOTA_EXCEEDED.*' | tr -d '"{},' | sed 's/:/: /g')
+        log_message "Warning: GoDaddy API quota exceeded. Some functionality will be limited."
+        log_message "  - Error: $quota_error_message"
+        quota_exceeded=true
+    elif [[ $? -eq 0 && -n "$response" ]] && echo "$response" | jq empty &>/dev/null; then
+        # Check response format and handle differently based on structure
+        local response_type
+        response_type=$(echo "$response" | jq -r 'type')
+        
+        if [[ "$response_type" == "array" ]]; then
+            # Extract domain names and add to array
+            while read -r domain; do
+                domains+=("$domain")
+            done < <(echo "$response" | jq -r '.[].domain')
+            
+            log_message "Successfully retrieved $(echo "$response" | jq 'length') domains from GoDaddy API"
+        elif [[ "$response_type" == "object" ]]; then
+            # It's an object with domain info - extract domain name if available
+            if echo "$response" | jq -e '.domain' &>/dev/null; then
+                local domain=$(echo "$response" | jq -r '.domain')
+                domains+=("$domain")
+                log_message "Retrieved single domain from GoDaddy API: $domain"
+            fi
+        else
+            log_message "Unexpected response type from GoDaddy API: $response_type"
+        fi
     else
-        merged="$result"
+        log_message "Warning: Could not retrieve domains list from GoDaddy API directly"
     fi
-    echo "$merged" > "$godaddy_file"
-}
-
-# Fetch subdomains from Cloudflare for a given domain with pagination
-fetch_cloudflare_subdomains() {
-    local domain=$1
-    echo "Fetching Cloudflare subdomains for $domain..." | tee -a "$log_file"
-    zone_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$domain" \
-        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-        -H "Content-Type: application/json")
-    echo "Cloudflare Zone Response for $domain: $zone_response" >> "$log_file"
-
-    zone_id=$(echo "$zone_response" | jq -r '.result[0].id')
-    if [[ -z "$zone_id" || "$zone_id" == "null" ]]; then
-        echo "Warning: No Cloudflare zone found for $domain." | tee -a "$log_file"
+    
+    # Second attempt: Try the shopper info endpoint if the domains endpoint didn't work and quota not exceeded
+    if [[ ${#domains[@]} -eq 0 && "$quota_exceeded" == "false" ]]; then
+        log_message "Trying alternative GoDaddy API endpoint to get domains..."
+        
+        local shopper_response
+        shopper_response=$(curl -s -X GET \
+            -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
+            -H "Accept: application/json" \
+            "https://api.godaddy.com/v1/shoppers/current")
+            
+        # Check if we hit the API quota limit
+        if echo "$shopper_response" | grep -q "QUOTA_EXCEEDED"; then
+            quota_error_message=$(echo "$shopper_response" | grep -o 'QUOTA_EXCEEDED.*' | tr -d '"{},' | sed 's/:/: /g')
+            log_message "Warning: GoDaddy API quota exceeded. Some functionality will be limited."
+            log_message "  - Error: $quota_error_message"
+            quota_exceeded=true
+        elif [[ $? -eq 0 && -n "$shopper_response" ]] && echo "$shopper_response" | jq empty &>/dev/null; then
+            # Try to get domains using the shopper ID
+            if echo "$shopper_response" | jq -e '.shopperId' &>/dev/null; then
+                local shopper_id=$(echo "$shopper_response" | jq -r '.shopperId')
+                log_message "Found GoDaddy shopper ID: $shopper_id"
+                
+                local domains_response
+                domains_response=$(curl -s -X GET \
+                    -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
+                    -H "Accept: application/json" \
+                    "https://api.godaddy.com/v1/domains?shopperId=$shopper_id&statuses=ACTIVE&limit=1000")
+                
+                # Check if we hit the API quota limit
+                if echo "$domains_response" | grep -q "QUOTA_EXCEEDED"; then
+                    quota_error_message=$(echo "$domains_response" | grep -o 'QUOTA_EXCEEDED.*' | tr -d '"{},' | sed 's/:/: /g')
+                    log_message "Warning: GoDaddy API quota exceeded. Some functionality will be limited."
+                    log_message "  - Error: $quota_error_message"
+                    quota_exceeded=true
+                elif [[ $? -eq 0 && -n "$domains_response" ]] && echo "$domains_response" | jq empty &>/dev/null; then
+                    if echo "$domains_response" | jq -e 'length > 0' &>/dev/null; then
+                        while read -r domain; do
+                            domains+=("$domain")
+                        done < <(echo "$domains_response" | jq -r '.[].domain')
+                        
+                        log_message "Retrieved $(echo "$domains_response" | jq 'length') domains from GoDaddy using shopper ID"
+                    fi
+                fi
+            fi
+        fi
+    fi
+    
+    # If all API methods failed, use the fallback list
+    if [[ ${#domains[@]} -eq 0 ]]; then
+        log_message "No domains found via API, using fallback domain list..."
+        while IFS= read -r domain; do
+            if [[ -n "$domain" ]]; then
+                domains+=("$domain")
+            fi
+        done <<< "$IMPORTANT_DOMAINS"
+    fi
+    
+    # Get total number of domains and log them
+    local total_domains=${#domains[@]}
+    log_message "Found $total_domains domains in GoDaddy"
+    
+    if [[ $total_domains -eq 0 ]]; then
+        log_message "No domains found. Check GoDaddy API credentials."
         return
     fi
+    
+    # Log all domains we're processing
+    log_message "Domains to process: ${domains[*]}"
 
-    page=1
-    per_page=600
-    all_records="[]"
-
-    while true; do
-        response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?page=$page&per_page=$per_page" \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            -H "Content-Type: application/json")
-        echo "Cloudflare DNS Records Response for $domain, page $page: $response" >> "$log_file"
-
-        error_count=$(echo "$response" | jq '.errors | length')
-        if [[ -z "$response" || "$error_count" -gt 0 ]]; then
-            echo "Warning: Failed to fetch Cloudflare DNS records for $domain on page $page." | tee -a "$log_file"
-            break
+    # Now get DNS records for each domain
+    local godaddy_assets="[]"
+    local domain_count=0
+    
+    # If the quota is already exceeded, don't even try to fetch DNS records
+    if [[ "$quota_exceeded" == "true" ]]; then
+        log_message "Skipping GoDaddy DNS record fetching due to API quota restrictions."
+        log_message "WARNING: No GoDaddy assets will be available in the final output."
+        if [[ -n "$quota_error_message" ]]; then
+            log_message "Quota error details: $quota_error_message"
         fi
-
-        page_records=$(echo "$response" | jq '.result')
-        count=$(echo "$page_records" | jq 'length')
-        all_records=$(jq -s '.[0] + .[1]' <(echo "$all_records") <(echo "$page_records"))
-        if (( count < per_page )); then
-            break
-        fi
-        ((page++))
-    done
-
-    formatted=$(echo "$all_records" | jq --arg domain "$domain" '[.[] | {name: .name, type: .type, data: .content, domain: $domain, source: "Cloudflare"}]')
-    if [[ -s "$cloudflare_file" ]]; then
-        merged=$(jq -s '.[0] + .[1]' "$cloudflare_file" <(echo "$formatted"))
-    else
-        merged="$formatted"
+        log_message "Consider waiting until the API quota resets, or contacting GoDaddy to increase your quota limit."
+        echo "$godaddy_assets" > "$godaddy_file"
+        return
     fi
-    echo "$merged" > "$cloudflare_file"
-}
-
-# Loop through all active domains and query both sources
-fetch_all_subdomains() {
-    domains=($(jq -r '.[].domain' "$domains_file"))
-    echo "Processing subdomains for ${#domains[@]} domains..." | tee -a "$log_file"
+    
     for domain in "${domains[@]}"; do
-        fetch_godaddy_subdomains "$domain"
-        fetch_cloudflare_subdomains "$domain"
-    done
-}
+        ((domain_count++))
+        log_message "Fetching DNS records for $domain ($domain_count of $total_domains)..."
+        local dns_response
+        dns_response=$(curl -s -X GET \
+            -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
+            -H "Accept: application/json" \
+            "https://api.godaddy.com/v1/domains/$domain/records")
 
-# Identify domains with no DNS records
-identify_no_dns_domains() {
-    active_domains=($(jq -r '.[].domain' "$domains_file"))
-    domains_with_dns=($(jq -r '.[].domain' "$godaddy_file" "$cloudflare_file" | sort -u))
-    echo "Checking for domains with no DNS records on both platforms..." | tee -a "$log_file"
-    for domain in "${active_domains[@]}"; do
-        if [[ ! " ${domains_with_dns[@]} " =~ " $domain " ]]; then
-            echo "$domain" >> "$no_dns_file"
+        # Check if we hit the API quota limit
+        if echo "$dns_response" | grep -q "QUOTA_EXCEEDED"; then
+            quota_error_message=$(echo "$dns_response" | grep -o 'QUOTA_EXCEEDED.*' | tr -d '"{},' | sed 's/:/: /g')
+            log_message "Warning: GoDaddy API quota exceeded when fetching DNS records for $domain."
+            log_message "  - Error: $quota_error_message"
+            log_message "No more DNS records can be fetched until the quota resets."
+            quota_exceeded=true
+            break
+        elif [[ -n "$dns_response" ]]; then
+            local dns_response_type
+            dns_response_type=$(echo "$dns_response" | jq -r 'type' 2>/dev/null)
+            
+            if [[ "$dns_response_type" == "array" ]]; then
+                local formatted
+                formatted=$(format_godaddy_records "$dns_response" "$domain" "$today_date")
+                
+                if [[ "$formatted" != "[]" ]]; then
+                    echo "$godaddy_assets" > "$script_dir/tmp_assets.json"
+                    echo "$formatted" > "$script_dir/tmp_formatted.json"
+                    merge_json_files "$script_dir/tmp_assets.json" "$script_dir/tmp_formatted.json" "$script_dir/tmp_assets.json"
+                    godaddy_assets=$(cat "$script_dir/tmp_assets.json")
+                    rm -f "$script_dir/tmp_assets.json" "$script_dir/tmp_formatted.json"
+                    log_message "Successfully processed $(echo "$formatted" | jq 'length') DNS records for $domain"
+                else
+                    log_message "No valid DNS records found for $domain"
+                fi
+            else
+                log_message "Warning: DNS response for $domain is not an array: $dns_response"
+            fi
+        else
+            log_message "Warning: Empty response when fetching DNS records for $domain"
         fi
     done
-    no_dns_count=$(wc -l < "$no_dns_file")
-    echo "Found $no_dns_count domains with no DNS records." | tee -a "$log_file"
+
+    # Save GoDaddy assets
+    echo "$godaddy_assets" > "$godaddy_file"
+    
+    # Final message about quota if needed
+    if [[ "$quota_exceeded" == "true" ]]; then
+        log_message "WARNING: GoDaddy API quota has been exceeded."
+        if [[ -n "$quota_error_message" ]]; then
+            log_message "Quota error details: $quota_error_message"
+        fi
+        log_message "The output will only contain Cloudflare assets. GoDaddy assets: $(echo "$godaddy_assets" | jq 'length')"
+    else
+        log_message "Saved $(echo "$godaddy_assets" | jq 'length') GoDaddy assets to $godaddy_file"
+    fi
 }
 
-# Generate final merged JSON output
-generate_final_output() {
-    echo "Generating final subdomains file..." | tee -a "$log_file"
-    merged=$(jq -s '.[0] + .[1]' "$godaddy_file" "$cloudflare_file")
-    echo "$merged" > "$final_file"
-    echo "Final subdomains saved to $final_file." | tee -a "$log_file"
+# Fetch assets from Cloudflare
+fetch_cloudflare_assets() {
+    log_message "Fetching assets from Cloudflare..."
+    local cloudflare_assets="[]"
+    
+    # Set API parameters
+    local account_id=""
+    local order="124"
+    local per_page=124
+    local dns_per_page=600
+    
+    # Create temp files
+    local zone_info_file="$script_dir/CloudflareZones.txt"
+    rm -f "$zone_info_file"
+    
+    # Check if we have a cached zones file that's less than 7 days old
+    local use_cache=false
+    local cache_age=999
+    
+    if [[ -f "$cloudflare_zones_cache" ]]; then
+        # Get file modification time and convert to seconds since epoch
+        local file_mod_time
+        file_mod_time=$(stat -f %m "$cloudflare_zones_cache" 2>/dev/null || stat -c %Y "$cloudflare_zones_cache" 2>/dev/null)
+        
+        if [[ -n "$file_mod_time" ]]; then
+            local current_time
+            current_time=$(date +%s)
+            
+            # Calculate age in days
+            cache_age=$(( (current_time - file_mod_time) / 86400 ))
+            
+            if [[ $cache_age -lt 7 ]]; then
+                use_cache=true
+                log_message "Using cached Cloudflare zones ($cache_age days old)"
+            else
+                log_message "Cloudflare zones cache is $cache_age days old, refreshing"
+            fi
+        fi
+    fi
+    
+    # If we're not using cache, fetch zones from the API
+    if [[ "$use_cache" == "false" ]]; then
+        # First check if we can get zones
+        local test_response
+        test_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?page=1&per_page=1" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+        
+        # Check if response has success field
+        if [[ -z "$test_response" ]] || ! echo "$test_response" | jq -e '.success' &>/dev/null; then
+            log_message "Error: Failed to connect to Cloudflare API. Response: $test_response"
+            
+            # If cache exists but is old, still use it as fallback
+            if [[ -f "$cloudflare_zones_cache" ]]; then
+                log_message "Using existing cache as fallback despite age"
+                use_cache=true
+            else
+                return
+            fi
+        fi
+        
+        if [[ "$use_cache" == "false" ]]; then
+            # Get total number of zones directly from first page result
+            local total_zones
+            total_zones=$(echo "$test_response" | jq -r '.result_info.total_count // 0')
+            
+            if [[ -z "$total_zones" || "$total_zones" == "null" || "$total_zones" -eq 0 ]]; then
+                log_message "Warning: No zones found in Cloudflare or unable to determine total count"
+                # Still try to fetch in case the count is wrong but we can get zones
+                total_zones=1
+            fi
+            
+            log_message "Found $total_zones total zones in Cloudflare"
+            
+            # Calculate number of pages needed (minimum 1)
+            local total_pages=$(( (total_zones + per_page - 1) / per_page ))
+            if [[ $total_pages -lt 1 ]]; then
+                total_pages=1
+            fi
+            
+            # Create a JSON array to store zone information
+            echo "[]" > "$cloudflare_zones_cache.tmp"
+            
+            # Loop through each page
+            for ((page=1; page<=total_pages; page++)); do
+                log_message "Fetching zones - Page $page of $total_pages"
+                
+                local cmd="curl -s -X GET \"https://api.cloudflare.com/client/v4/zones?page=$page&per_page=$per_page&order=$order\" -H \"Authorization: Bearer $CLOUDFLARE_API_TOKEN\""
+                
+                # Add account.id param if specified
+                if [[ -n "$account_id" ]]; then
+                    cmd="$cmd -H \"Content-Type: application/json\" -d '{\"account.id\":\"$account_id\"}'"
+                fi
+                
+                # Execute the command and extract zone IDs with domain names
+                local zone_data
+                zone_data=$(eval "$cmd")
+                
+                if [[ -n "$zone_data" ]] && echo "$zone_data" | jq -e '.success' &>/dev/null; then
+                    # Extract zone information and append to the cache file
+                    echo "$zone_data" | jq -r '.result[] | {id: .id, name: .name}' | jq -s '.' > "$cloudflare_zones_cache.tmp.page"
+                    
+                    # Merge with existing results
+                    jq -s '.[0] + .[1]' "$cloudflare_zones_cache.tmp" "$cloudflare_zones_cache.tmp.page" > "$cloudflare_zones_cache.tmp.merged"
+                    mv "$cloudflare_zones_cache.tmp.merged" "$cloudflare_zones_cache.tmp"
+                    rm -f "$cloudflare_zones_cache.tmp.page"
+                else
+                    log_message "Warning: Failed to fetch zones for page $page"
+                fi
+            done
+            
+            # Move temporary cache to final location
+            mv "$cloudflare_zones_cache.tmp" "$cloudflare_zones_cache"
+            
+            # Also extract to the zone_info_file for processing
+            jq -r '.[] | .id + " " + .name' "$cloudflare_zones_cache" > "$zone_info_file"
+            
+            log_message "Cached $(jq 'length' "$cloudflare_zones_cache") Cloudflare zones for future use"
+        fi
+    fi
+    
+    # If we're using the cache, extract zone info to the processing file
+    if [[ "$use_cache" == "true" ]]; then
+        jq -r '.[] | .id + " " + .name' "$cloudflare_zones_cache" > "$zone_info_file"
+        local zone_count=$(wc -l < "$zone_info_file")
+        log_message "Using $zone_count cached Cloudflare zones from cache ($cache_age days old)"
+    fi
+    
+    # Check if we got any zone info
+    if [[ ! -s "$zone_info_file" ]]; then
+        log_message "Error: No zone information found. Check Cloudflare API token permissions."
+        return
+    fi
+    
+    # Process each zone's DNS records
+    while IFS= read -r line; do
+        local zone_id zone_name
+        zone_id=$(echo "$line" | awk '{print $1}')
+        zone_name=$(echo "$line" | cut -d' ' -f2-)
+        
+        log_message "Fetching DNS records for zone $zone_name ($zone_id)"
+        
+        local response
+        response=$(curl -s -X GET \
+            "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?page=1&per_page=$dns_per_page" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+            
+        if [[ -n "$response" ]] && echo "$response" | jq -e '.success' &>/dev/null; then
+            local formatted
+            formatted=$(format_cloudflare_records "$response" "$zone_name" "$today_date")
+            
+            if [[ "$formatted" != "[]" ]]; then
+                echo "$cloudflare_assets" > "$script_dir/tmp_assets.json"
+                echo "$formatted" > "$script_dir/tmp_formatted.json"
+                merge_json_files "$script_dir/tmp_assets.json" "$script_dir/tmp_formatted.json" "$script_dir/tmp_assets.json"
+                cloudflare_assets=$(cat "$script_dir/tmp_assets.json")
+                rm -f "$script_dir/tmp_assets.json" "$script_dir/tmp_formatted.json"
+            fi
+        else
+            log_message "Warning: Failed to fetch DNS records for zone $zone_name ($zone_id)"
+        fi
+    done < "$zone_info_file"
+    
+    # Clean up temporary file
+    rm -f "$zone_info_file"
+    
+    # Save Cloudflare assets
+    echo "$cloudflare_assets" > "$cloudflare_file"
+    log_message "Saved $(echo "$cloudflare_assets" | jq 'length') Cloudflare assets to $cloudflare_file"
 }
 
-# Generate a Markdown table from the final JSON file.
-# The records are sorted by domain first and then by subdomain (.name)
-generate_markdown() {
-    echo "Generating Markdown table..." | tee -a "$log_file"
+# Check GoDaddy API quota limits
+check_godaddy_quota() {
+    log_message "Checking GoDaddy API quota limits..."
+    
+    # Use a HEAD request to check headers without consuming quota for a full request
+    local headers
+    headers=$(curl -s -I -X GET \
+        -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
+        -H "Accept: application/json" \
+        "https://api.godaddy.com/v1/domains")
+    
+    # Check if headers were returned
+    if [[ -z "$headers" ]]; then
+        log_message "Error: Failed to get headers from GoDaddy API."
+        return 1
+    fi
+    
+    # Check for rate limit information
+    local limit=$(echo "$headers" | grep -i "X-RateLimit-Limit" | cut -d':' -f2- | tr -d ' \r')
+    local remaining=$(echo "$headers" | grep -i "X-RateLimit-Remaining" | cut -d':' -f2- | tr -d ' \r')
+    local reset=$(echo "$headers" | grep -i "X-RateLimit-Reset" | cut -d':' -f2- | tr -d ' \r')
+    
+    # Display rate limit information
+    log_message "GoDaddy API Rate Limit Information:"
+    if [[ -n "$limit" ]]; then
+        log_message "  - Rate Limit: $limit requests"
+    else
+        log_message "  - Rate Limit: Not provided"
+    fi
+    
+    if [[ -n "$remaining" ]]; then
+        log_message "  - Remaining: $remaining requests"
+    else
+        log_message "  - Remaining: Not provided"
+    fi
+    
+    if [[ -n "$reset" ]]; then
+        # Convert reset timestamp to human-readable date if it's a unix timestamp
+        if [[ "$reset" =~ ^[0-9]+$ ]]; then
+            local reset_date=$(date -r "$reset" 2>/dev/null || date -d "@$reset" 2>/dev/null || echo "$reset")
+            log_message "  - Reset Time: $reset_date"
+        else
+            log_message "  - Reset Time: $reset"
+        fi
+    else
+        log_message "  - Reset Time: Not provided"
+    fi
+    
+    # Check for quota exceeded error in the response
+    if echo "$headers" | grep -q "QUOTA_EXCEEDED"; then
+        log_message "WARNING: GoDaddy API quota already exceeded."
+        return 2
+    fi
+    
+    # Also check a specific endpoint that might have different quotas
+    local dns_headers
+    dns_headers=$(curl -s -I -X GET \
+        -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
+        -H "Accept: application/json" \
+        "https://api.godaddy.com/v1/domains/bertholdtypes.com/records")
+    
+    # Check if headers were returned
+    if [[ -n "$dns_headers" ]]; then
+        local dns_limit=$(echo "$dns_headers" | grep -i "X-RateLimit-Limit" | cut -d':' -f2- | tr -d ' \r')
+        local dns_remaining=$(echo "$dns_headers" | grep -i "X-RateLimit-Remaining" | cut -d':' -f2- | tr -d ' \r')
+        
+        if [[ -n "$dns_limit" || -n "$dns_remaining" ]]; then
+            log_message "DNS Records Endpoint Rate Limits:"
+            [[ -n "$dns_limit" ]] && log_message "  - Rate Limit: $dns_limit requests"
+            [[ -n "$dns_remaining" ]] && log_message "  - Remaining: $dns_remaining requests"
+        fi
+        
+        # Check for quota exceeded in DNS endpoint specifically
+        if echo "$dns_headers" | grep -q "QUOTA_EXCEEDED"; then
+            log_message "WARNING: DNS records endpoint quota exceeded."
+            return 3
+        fi
+    fi
+    
+    return 0
+}
+
+#####################
+# Output Generation #
+#####################
+
+generate_asset_documentation() {
+    log_message "Generating asset documentation..."
+    
+    # Merge GoDaddy and Cloudflare assets
+    merge_json_files "$godaddy_file" "$cloudflare_file" "$merged_file"
+    
+    # Check if GoDaddy assets are empty (likely due to quota being exceeded)
+    local godaddy_count
+    godaddy_count=$(jq 'length' "$godaddy_file")
+    local godaddy_notice=""
+    
+    if [[ "$godaddy_count" -eq 0 ]]; then
+        godaddy_notice="⚠️ **Note:** GoDaddy API quota has been exceeded. The results only contain Cloudflare assets. Try again later when the quota resets."
+    fi
+    
+    # Generate markdown documentation
     {
-        echo "# Subdomain Table"
+        echo "# Organization Assets"
         echo ""
-        echo "| Subdomain | Domain | Type | Data | Source |"
-        echo "|-----------|--------|------|------|--------|"
-        jq -r 'sort_by(.domain, .name) |
-               .[] | "| " + (.name // "N/A") + " | " +
-                     (.domain // "N/A") + " | " +
-                     (.type // "N/A") + " | " +
-                     (.data // "N/A") + " | " +
-                     (.source // "N/A") + " |"' "$final_file"
+        echo "Last Updated: $today_date"
+        echo ""
+        if [[ -n "$godaddy_notice" ]]; then
+            echo "$godaddy_notice"
+            echo ""
+        fi
+        echo "## Summary"
+        echo ""
+        echo "- Total Assets: $(jq 'length' "$merged_file")"
+        echo "- GoDaddy Assets: $(jq 'length' "$godaddy_file")"
+        echo "- Cloudflare Assets: $(jq 'length' "$cloudflare_file")"
+        echo ""
+        echo "## Asset Details"
+        echo ""
+        echo "| Domain | Subdomain | Type | Data | Source | Discovery Date |"
+        echo "|--------|-----------|------|------|--------|----------------|"
+        jq -r '
+            sort_by(.domain, .name)
+            | .[]
+            | "| " + (.domain // "N/A") + " | "
+                  + (.name // "N/A") + " | "
+                  + (.type // "N/A") + " | "
+                  + (.data // "N/A") + " | "
+                  + (.source // "N/A") + " | "
+                  + (.discovery_date // "N/A") + " |"
+        ' "$merged_file"
     } > "$markdown_file"
-    echo "Markdown table saved to $markdown_file." | tee -a "$log_file"
+    
+    # Generate HTML documentation with table filtering and responsive design
+    {
+        echo "<!DOCTYPE html>"
+        echo "<html>"
+        echo "<head>"
+        echo "    <title>Organization Assets</title>"
+        echo "    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+        echo "    <style>"
+        echo "        body { font-family: Arial, sans-serif; margin: 20px; max-width: 1200px; margin: 0 auto; padding: 20px; }"
+        echo "        h1 { color: #333; }"
+        echo "        .summary { background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin-bottom: 30px; }"
+        echo "        .warning { background-color: #fffce1; border-left: 4px solid #ffd600; padding: 10px 20px; margin-bottom: 20px; color: #846504; }"
+        echo "        .warning strong { color: #846504; }"
+        echo "        .info { background-color: #e8f4fd; border-left: 4px solid #0077cc; padding: 10px 20px; margin-bottom: 20px; color: #00508b; }"
+        echo "        .info h3 { color: #00508b; margin-top: 0; }"
+        echo "        .info ul { margin-left: 20px; padding-left: 0; }"
+        echo "        .info li { margin-bottom: 5px; }"
+        echo "        .table-container { overflow-x: auto; max-height: 80vh; }"
+        echo "        table { width: 100%; border-collapse: collapse; margin-top: 20px; table-layout: fixed; }"
+        echo "        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; vertical-align: top; font-size: 13px; }"
+        echo "        th { background-color: #4CAF50; color: white; cursor: pointer; position: sticky; top: 0; z-index: 10; }"
+        echo "        th:hover { background-color: #3e8e41; }"
+        echo "        tr:nth-child(even) { background-color: #f2f2f2; }"
+        echo "        tr:hover { background-color: #ddd; }"
+        echo "        .timestamp { color: #666; font-size: 0.9em; margin-bottom: 20px; }"
+        echo "        .filter-row input { width: 100%; padding: 8px; box-sizing: border-box; }"
+        echo "        .filter-controls { margin-bottom: 20px; }"
+        echo "        .filter-controls button { padding: 8px 16px; margin-right: 10px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }"
+        echo "        .filter-controls button:hover { background-color: #3e8e41; }"
+        echo "        /* Column widths */"
+        echo "        th:nth-child(1), td:nth-child(1) { width: 15%; } /* Domain */"
+        echo "        th:nth-child(2), td:nth-child(2) { width: 15%; overflow-wrap: break-word; word-wrap: break-word; word-break: break-all; } /* Subdomain */"
+        echo "        th:nth-child(3), td:nth-child(3) { width: 8%; } /* Type */"
+        echo "        th:nth-child(4), td:nth-child(4) { width: 40%; overflow-wrap: break-word; word-wrap: break-word; word-break: break-all; hyphens: auto; max-width: 0; } /* Data */"
+        echo "        th:nth-child(5), td:nth-child(5) { width: 10%; } /* Source */"
+        echo "        th:nth-child(6), td:nth-child(6) { width: 12%; } /* Discovery Date */"
+        echo "        /* Record-specific styling */"
+        echo "        td.txt-data { font-family: monospace; font-size: 11px; white-space: pre-wrap; color: #333; }"
+        echo "        td.cname-data { color: #0066cc; }"
+        echo "        td.a-data { color: #009900; }"
+        echo "        td.aaaa-data { color: #009900; }"
+        echo "        td.mx-data { color: #cc6600; }"
+        echo "        td.ns-data { color: #660066; }"
+        echo "        td.spf-data { font-family: monospace; font-size: 11px; white-space: pre-wrap; color: #333; }"
+        echo "        td.dkim-data { font-family: monospace; font-size: 11px; white-space: pre-wrap; color: #333; }"
+        echo "        /* Toggle button styling */"
+        echo "        .toggle-btn { margin-top: 5px; background-color: #f0f0f0; border: 1px solid #ccc; padding: 2px 5px; font-size: 11px; cursor: pointer; border-radius: 3px; }"
+        echo "        .toggle-btn:hover { background-color: #e0e0e0; }"
+        echo "        .collapsed-content { word-break: break-all; }"
+        echo "        .full-content { word-break: break-all; padding: 3px; background-color: #f9f9f9; border: 1px solid #eee; border-radius: 3px; margin-top: 3px; font-size: 11px; max-height: 300px; overflow-y: auto; }"
+        echo "        /* Responsive design */"
+        echo "        @media screen and (max-width: 768px) {"
+        echo "            body { margin: 10px; padding: 10px; }"
+        echo "            .filter-controls button { width: 100%; margin-bottom: 10px; }"
+        echo "            th, td { padding: 8px; font-size: 14px; }"
+        echo "        }"
+        echo "    </style>"
+        echo "</head>"
+        echo "<body>"
+        echo "    <h1>Organization Assets</h1>"
+        echo "    <div class='timestamp'>Last Updated: $today_date</div>"
+        if [[ -n "$godaddy_notice" ]]; then
+            echo "    <div class='warning'><strong>Warning:</strong> GoDaddy API quota has been exceeded. The results only contain Cloudflare assets. Try again later when the quota resets.</div>"
+            
+            # Add explanation about GoDaddy API quotas
+            echo "    <div class='info'>"
+            echo "        <h3>About GoDaddy API Quotas</h3>"
+            echo "        <p>The GoDaddy API has limited quota allowances:</p>"
+            echo "        <ul>"
+            echo "            <li><strong>Monthly Quota:</strong> GoDaddy limits the number of API calls per month (typically 1,000-5,000 depending on your plan).</li>"
+            echo "            <li><strong>Rate Limits:</strong> GoDaddy also limits the rate of API calls (typically 60 per minute).</li>"
+            echo "            <li><strong>Reset Time:</strong> Monthly quotas typically reset at the beginning of each calendar month.</li>"
+            echo "        </ul>"
+            echo "        <p>If you need higher quotas, consider contacting GoDaddy to upgrade your API plan.</p>"
+            echo "    </div>"
+        fi
+        echo "    <div class='summary'>"
+        echo "        <h2>Summary</h2>"
+        echo "        <p>Total Assets: $(jq 'length' "$merged_file")</p>"
+        echo "        <p>GoDaddy Assets: $(jq 'length' "$godaddy_file")</p>"
+        echo "        <p>Cloudflare Assets: $(jq 'length' "$cloudflare_file")</p>"
+        echo "    </div>"
+        echo "    <div class='filter-controls'>"
+        echo "        <button onclick='resetFilters()'>Reset Filters</button>"
+        echo "        <button onclick='exportToCSV()'>Export to CSV</button>"
+        echo "    </div>"
+        echo "    <h2>Asset Details</h2>"
+        echo "    <div class='table-container'>"
+        echo "        <table id='assetsTable'>"
+        echo "            <thead>"
+        echo "                <tr>"
+        echo "                    <th onclick='sortTable(0)'>Domain</th>"
+        echo "                    <th onclick='sortTable(1)'>Subdomain</th>"
+        echo "                    <th onclick='sortTable(2)'>Type</th>"
+        echo "                    <th onclick='sortTable(3)'>Data</th>"
+        echo "                    <th onclick='sortTable(4)'>Source</th>"
+        echo "                    <th onclick='sortTable(5)'>Discovery Date</th>"
+        echo "                </tr>"
+        echo "                <tr class='filter-row'>"
+        echo "                    <td><input type='text' onkeyup='filterTable()' placeholder='Filter domain...'></td>"
+        echo "                    <td><input type='text' onkeyup='filterTable()' placeholder='Filter subdomain...'></td>"
+        echo "                    <td><input type='text' onkeyup='filterTable()' placeholder='Filter type...'></td>"
+        echo "                    <td><input type='text' onkeyup='filterTable()' placeholder='Filter data...'></td>"
+        echo "                    <td><input type='text' onkeyup='filterTable()' placeholder='Filter source...'></td>"
+        echo "                    <td><input type='text' onkeyup='filterTable()' placeholder='Filter date...'></td>"
+        echo "                </tr>"
+        echo "            </thead>"
+        echo "            <tbody>"
+        jq -r '
+            sort_by(.domain, .name)
+            | .[]
+            | "            <tr>\n"
+                  + "                <td>" + (.domain // "N/A") + "</td>\n"
+                  + "                <td>" + (.name // "N/A") + "</td>\n"
+                  + "                <td>" + (.type // "N/A") + "</td>\n"
+                  + "                <td class=\"" + (.type | ascii_downcase) + "-data\">" + (.data // "N/A") + "</td>\n"
+                  + "                <td>" + (.source // "N/A") + "</td>\n"
+                  + "                <td>" + (.discovery_date // "N/A") + "</td>\n"
+                  + "            </tr>"
+        ' "$merged_file"
+        echo "            </tbody>"
+        echo "        </table>"
+        echo "    </div>"
+        echo "    <script>"
+        echo "        // Function to process long text content when page loads"
+        echo "        window.onload = function() {"
+        echo "            processTxtRecords();"
+        echo "            // After initial load, sort by domain name"
+        echo "            sortTable(0);"
+        echo "        };"
+        
+        echo "        function processTxtRecords() {"
+        echo "            // Get all cells with txt-data class or other types with long data"
+        echo "            const longDataCells = document.querySelectorAll('td.txt-data, td.dkim-data, td.spf-data');"
+        echo "            longDataCells.forEach(cell => {"
+        echo "                const content = cell.textContent;"
+        echo "                // If content is longer than 60 characters, make it collapsible"
+        echo "                if (content.length > 60) {"
+        echo "                    const shortContent = content.substring(0, 60) + '...';"
+        echo "                    cell.innerHTML = \`"
+        echo "                        <div class='collapsed-content'>\${shortContent}</div>"
+        echo "                        <div class='full-content' style='display:none'>\${content}</div>"
+        echo "                        <button class='toggle-btn' onclick='toggleContent(this)'>Show More</button>"
+        echo "                    \`;"
+        echo "                }"
+        echo "            });"
+        echo ""
+        echo "            // Also process any CNAME data that's long"
+        echo "            const cnameCells = document.querySelectorAll('td.cname-data, td.mx-data');"
+        echo "            cnameCells.forEach(cell => {"
+        echo "                const content = cell.textContent;"
+        echo "                if (content.length > 40) {"
+        echo "                    const shortContent = content.substring(0, 40) + '...';"
+        echo "                    cell.innerHTML = \`"
+        echo "                        <div class='collapsed-content'>\${shortContent}</div>"
+        echo "                        <div class='full-content' style='display:none'>\${content}</div>"
+        echo "                        <button class='toggle-btn' onclick='toggleContent(this)'>Show More</button>"
+        echo "                    \`;"
+        echo "                }"
+        echo "            });"
+        echo ""
+        echo "            // Process long subdomains"
+        echo "            const subdomainCells = document.querySelectorAll('tbody tr td:nth-child(2)');"
+        echo "            subdomainCells.forEach(cell => {"
+        echo "                const content = cell.textContent;"
+        echo "                if (content.length > 30) {"
+        echo "                    const shortContent = content.substring(0, 30) + '...';"
+        echo "                    cell.innerHTML = \`"
+        echo "                        <div class='collapsed-content'>\${shortContent}</div>"
+        echo "                        <div class='full-content' style='display:none'>\${content}</div>"
+        echo "                        <button class='toggle-btn' onclick='toggleContent(this)'>Show More</button>"
+        echo "                    \`;"
+        echo "                }"
+        echo "            });"
+        echo "        }"
+        
+        echo "        function toggleContent(btn) {"
+        echo "            const cell = btn.parentElement;"
+        echo "            const collapsedDiv = cell.querySelector('.collapsed-content');"
+        echo "            const fullDiv = cell.querySelector('.full-content');"
+        
+        echo "            if (collapsedDiv.style.display === 'none') {"
+        echo "                collapsedDiv.style.display = 'block';"
+        echo "                fullDiv.style.display = 'none';"
+        echo "                btn.textContent = 'Show More';"
+        echo "            } else {"
+        echo "                collapsedDiv.style.display = 'none';"
+        echo "                fullDiv.style.display = 'block';"
+        echo "                btn.textContent = 'Show Less';"
+        echo "            }"
+        echo "        }"
+
+        echo "        function filterTable() {"
+        echo "            const table = document.getElementById('assetsTable');"
+        echo "            const rows = table.getElementsByTagName('tr');"
+        echo "            const filters = document.querySelectorAll('.filter-row input');"
+        echo ""
+        echo "            // Start from 2 to skip header and filter rows"
+        echo "            for (let i = 2; i < rows.length; i++) {"
+        echo "                let show = true;"
+        echo "                const cells = rows[i].getElementsByTagName('td');"
+        echo ""
+        echo "                for (let j = 0; j < filters.length; j++) {"
+        echo "                    const filter = filters[j].value.toUpperCase();"
+        echo "                    if (filter && cells[j].textContent.toUpperCase().indexOf(filter) === -1) {"
+        echo "                        show = false;"
+        echo "                        break;"
+        echo "                    }"
+        echo "                }"
+        echo ""
+        echo "                rows[i].style.display = show ? '' : 'none';"
+        echo "            }"
+        echo "        }"
+        echo ""
+        echo "        function resetFilters() {"
+        echo "            const filters = document.querySelectorAll('.filter-row input');"
+        echo "            filters.forEach(filter => filter.value = '');"
+        echo "            filterTable();"
+        echo "        }"
+        echo ""
+        echo "        function sortTable(n) {"
+        echo "            const table = document.getElementById('assetsTable');"
+        echo "            let switching = true;"
+        echo "            let dir = 'asc';"
+        echo "            let switchcount = 0;"
+        echo ""
+        echo "            while (switching) {"
+        echo "                switching = false;"
+        echo "                const rows = table.rows;"
+        echo ""
+        echo "                for (let i = 2; i < (rows.length - 1); i++) {"
+        echo "                    let shouldSwitch = false;"
+        echo "                    const x = rows[i].getElementsByTagName('td')[n];"
+        echo "                    const y = rows[i + 1].getElementsByTagName('td')[n];"
+        echo ""
+        echo "                    if (dir === 'asc') {"
+        echo "                        if (x.innerHTML.toLowerCase() > y.innerHTML.toLowerCase()) {"
+        echo "                            shouldSwitch = true;"
+        echo "                            break;"
+        echo "                        }"
+        echo "                    } else if (dir === 'desc') {"
+        echo "                        if (x.innerHTML.toLowerCase() < y.innerHTML.toLowerCase()) {"
+        echo "                            shouldSwitch = true;"
+        echo "                            break;"
+        echo "                        }"
+        echo "                    }"
+        echo ""
+        echo "                    if (shouldSwitch) {"
+        echo "                        rows[i].parentNode.insertBefore(rows[i + 1], rows[i]);"
+        echo "                        switching = true;"
+        echo "                        switchcount++;"
+        echo "                    }"
+        echo "                }"
+        echo ""
+        echo "                if (switchcount === 0 && dir === 'asc') {"
+        echo "                    dir = 'desc';"
+        echo "                    switching = true;"
+        echo "                }"
+        echo "            }"
+        echo "        }"
+        echo ""
+        echo "        function exportToCSV() {"
+        echo "            const table = document.getElementById('assetsTable');"
+        echo "            let csv = [];"
+        echo "            const rows = table.querySelectorAll('tr');"
+        echo ""
+        echo "            for (let i = 0; i < rows.length; i++) {"
+        echo "                if (i === 1) continue; // Skip the filter row"
+        echo "                if (rows[i].style.display === 'none') continue; // Skip filtered out rows"
+        echo ""
+        echo "                const row = [];"
+        echo "                const cols = rows[i].querySelectorAll('td, th');"
+        echo ""
+        echo "                for (let j = 0; j < cols.length; j++) {"
+        echo "                    // Get the text content, handling header cells"
+        echo "                    let text = cols[j].textContent || cols[j].innerText;"
+        echo "                    // Replace commas and quotes"
+        echo "                    text = text.replace(/\"/g, '\"\"');"
+        echo "                    row.push('\"' + text + '\"');"
+        echo "                }"
+        echo "                csv.push(row.join(','));"
+        echo "            }"
+        echo ""
+        echo "            const csvStr = csv.join('\\n');"
+        echo "            const blob = new Blob([csvStr], { type: 'text/csv;charset=utf-8;' });"
+        echo "            const link = document.createElement('a');"
+        echo "            const url = URL.createObjectURL(blob);"
+        echo ""
+        echo "            link.setAttribute('href', url);"
+        echo "            link.setAttribute('download', 'org_assets_' + new Date().toISOString().slice(0, 10) + '.csv');"
+        echo "            link.style.visibility = 'hidden';"
+        echo "            document.body.appendChild(link);"
+        echo "            link.click();"
+        echo "            document.body.removeChild(link);"
+        echo "        }"
+        echo "    </script>"
+        echo "</body>"
+        echo "</html>"
+    } > "$html_file"
 }
 
 #####################
 # Main Execution    #
 #####################
 
-fetch_domains
-fetch_all_subdomains
-identify_no_dns_domains
-generate_final_output
-generate_markdown
+# Initialize JSON files
+echo "[]" > "$godaddy_file"
+echo "[]" > "$cloudflare_file"
+echo "[]" > "$merged_file"
 
-if [[ -s "$no_dns_file" ]]; then
-    echo "Domains with no DNS records (saved to $no_dns_file):"
-    cat "$no_dns_file"
-else
-    echo "All domains have DNS records on at least one platform."
+# Check API connectivity before proceeding
+if ! check_api_connectivity; then
+    log_message "Error: API connectivity check failed. Exiting."
+    exit 1
 fi
 
-echo "Script Execution Completed: $(date)" >> "$log_file"
+# Check GoDaddy API quota limits
+if ! check_godaddy_quota; then
+    log_message "Error: GoDaddy API quota check failed. Exiting."
+    exit 1
+fi
 
-# Cleanup temporary files (keep final output, markdown file, and log file)
-rm -f "$domains_file" "$godaddy_file" "$cloudflare_file" "$no_dns_file"
+# Fetch assets from both providers
+fetch_godaddy_assets
+fetch_cloudflare_assets
+
+# Generate documentation
+generate_asset_documentation
+
+# Final summary
+log_message "Script Execution Completed: $(date)"
+log_message ""
+log_message "Output Files:"
+log_message "- GoDaddy Assets: $godaddy_file"
+log_message "- Cloudflare Assets: $cloudflare_file"
+log_message "- Merged Assets: $merged_file"
+log_message "- Asset Documentation (Markdown): $markdown_file"
+log_message "- Asset Documentation (HTML): $html_file"
