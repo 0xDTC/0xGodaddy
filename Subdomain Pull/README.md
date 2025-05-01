@@ -5,8 +5,10 @@
 Automates domain and subdomain retrieval from GoDaddy and Cloudflare, then generates comprehensive asset documentation in both Markdown and HTML formats.
 
 ## Features
-- Fetch domains from GoDaddy API with pagination
-- Retrieve DNS records (A, CNAME, TXT, etc.) from GoDaddy and Cloudflare
+- Fetch domains from GoDaddy API with robust pagination support
+- Retrieve all DNS records (A, CNAME, TXT, etc.) from GoDaddy and Cloudflare with full pagination
+- Process all active domains (now handles 1000+ domains)
+- Enhanced error handling and rate limiting protection
 - Cache Cloudflare zones for one week to reduce API calls
 - Group and sort records by domain and subdomain
 - Track discovery dates for all assets
@@ -14,6 +16,28 @@ Automates domain and subdomain retrieval from GoDaddy and Cloudflare, then gener
 - Generate clean Markdown table output
 - Handle API quota limits gracefully
 - Optional logging for debugging
+
+## Data Flow Diagram
+
+```mermaid
+flowchart TD
+    A[GoDaddy API] -->|Domains| B[Domain Retrieval]
+    Z[../Domain Pull/GDdomain.md] -->|Fallback Domains| B
+    B -->|All Domains| C[DNS Records Retrieval]
+    A -->|DNS Records| C
+    D[Cloudflare API] -->|Zones| E[Zone Retrieval]
+    F[(Cloudflare Cache)] <-->|Cache/Update| E
+    E -->|All Zones| G[DNS Records Retrieval]
+    D -->|DNS Records| G
+    C -->|Formatted Records| H[JSON Processing]
+    G -->|Formatted Records| H
+    H -->|Merged Data| I[Asset Documentation]
+    I -->|JSON| J[godaddy_assets.json]
+    I -->|JSON| K[cloudflare_assets.json]
+    I -->|JSON| L[org_assets.json]
+    I -->|Markdown| M[Org-Assets.md]
+    I -->|HTML| N[Org-Assets.html]
+```
 
 ## Prerequisites
 - Bash shell (Linux, macOS, or WSL)
