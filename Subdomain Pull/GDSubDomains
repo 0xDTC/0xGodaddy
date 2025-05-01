@@ -228,123 +228,170 @@ fetch_godaddy_assets() {
     local quota_exceeded=false
     local quota_error_message=""
     
-    # Hard-code a few important domains if the API doesn't return anything
-    # This serves as a fallback in case the GoDaddy API domain list is restricted
-    read -r -d '' IMPORTANT_DOMAINS << EOL
-typographyincorporated.com
-berhold.com
-bertholdtypes.com
-bertholdtypegroup.com
-EOL
-
-    # First attempt: Use the domains API
-    local response
-    response=$(curl -s -X GET \
-        -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
-        -H "Accept: application/json" \
-        "https://api.godaddy.com/v1/domains?statuses=ACTIVE&limit=1000")
+    # Use the approach from GDomains script that's successfully listing domains
+    local marker=""
+    local page=1
+    local max_pages=10  # Limit to avoid infinite loops
     
-    # Check if we hit the API quota limit
-    if echo "$response" | grep -q "QUOTA_EXCEEDED"; then
-        quota_error_message=$(echo "$response" | grep -o 'QUOTA_EXCEEDED.*' | tr -d '"{},' | sed 's/:/: /g')
-        log_message "Warning: GoDaddy API quota exceeded. Some functionality will be limited."
-        log_message "  - Error: $quota_error_message"
-        quota_exceeded=true
-    elif [[ $? -eq 0 && -n "$response" ]] && echo "$response" | jq empty &>/dev/null; then
-        # Check response format and handle differently based on structure
-        local response_type
-        response_type=$(echo "$response" | jq -r 'type')
-        
-        if [[ "$response_type" == "array" ]]; then
-            # Extract domain names and add to array
-            while read -r domain; do
-                domains+=("$domain")
-            done < <(echo "$response" | jq -r '.[].domain')
-            
-            log_message "Successfully retrieved $(echo "$response" | jq 'length') domains from GoDaddy API"
-        elif [[ "$response_type" == "object" ]]; then
-            # It's an object with domain info - extract domain name if available
-            if echo "$response" | jq -e '.domain' &>/dev/null; then
-                local domain=$(echo "$response" | jq -r '.domain')
-                domains+=("$domain")
-                log_message "Retrieved single domain from GoDaddy API: $domain"
-            fi
-        else
-            log_message "Unexpected response type from GoDaddy API: $response_type"
-        fi
-    else
-        log_message "Warning: Could not retrieve domains list from GoDaddy API directly"
-    fi
+    log_message "Retrieving domains from GoDaddy API (paginated)..."
     
-    # Second attempt: Try the shopper info endpoint if the domains endpoint didn't work and quota not exceeded
-    if [[ ${#domains[@]} -eq 0 && "$quota_exceeded" == "false" ]]; then
-        log_message "Trying alternative GoDaddy API endpoint to get domains..."
-        
-        local shopper_response
-        shopper_response=$(curl -s -X GET \
+    while [[ $page -le $max_pages ]]; do
+        log_message "Fetching page $page of domains..."
+        local response
+        response=$(curl -s -X GET \
             -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
             -H "Accept: application/json" \
-            "https://api.godaddy.com/v1/shoppers/current")
-            
+            "https://api.godaddy.com/v1/domains?statuses=ACTIVE&limit=$PAGE_SIZE&marker=$marker")
+        
         # Check if we hit the API quota limit
-        if echo "$shopper_response" | grep -q "QUOTA_EXCEEDED"; then
-            quota_error_message=$(echo "$shopper_response" | grep -o 'QUOTA_EXCEEDED.*' | tr -d '"{},' | sed 's/:/: /g')
+        if echo "$response" | grep -q "QUOTA_EXCEEDED"; then
+            quota_error_message=$(echo "$response" | grep -o 'QUOTA_EXCEEDED.*' | tr -d '"{},' | sed 's/:/: /g')
             log_message "Warning: GoDaddy API quota exceeded. Some functionality will be limited."
             log_message "  - Error: $quota_error_message"
             quota_exceeded=true
-        elif [[ $? -eq 0 && -n "$shopper_response" ]] && echo "$shopper_response" | jq empty &>/dev/null; then
-            # Try to get domains using the shopper ID
-            if echo "$shopper_response" | jq -e '.shopperId' &>/dev/null; then
-                local shopper_id=$(echo "$shopper_response" | jq -r '.shopperId')
-                log_message "Found GoDaddy shopper ID: $shopper_id"
+            break
+        elif [[ $? -eq 0 && -n "$response" ]] && echo "$response" | jq empty &>/dev/null; then
+            # Check response format and handle differently based on structure
+            local response_type
+            response_type=$(echo "$response" | jq -r 'type')
+            
+            if [[ "$response_type" == "array" ]]; then
+                # Extract domain names and add to array
+                local count=0
+                count=$(echo "$response" | jq 'length')
                 
-                local domains_response
-                domains_response=$(curl -s -X GET \
-                    -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
-                    -H "Accept: application/json" \
-                    "https://api.godaddy.com/v1/domains?shopperId=$shopper_id&statuses=ACTIVE&limit=1000")
-                
-                # Check if we hit the API quota limit
-                if echo "$domains_response" | grep -q "QUOTA_EXCEEDED"; then
-                    quota_error_message=$(echo "$domains_response" | grep -o 'QUOTA_EXCEEDED.*' | tr -d '"{},' | sed 's/:/: /g')
-                    log_message "Warning: GoDaddy API quota exceeded. Some functionality will be limited."
-                    log_message "  - Error: $quota_error_message"
-                    quota_exceeded=true
-                elif [[ $? -eq 0 && -n "$domains_response" ]] && echo "$domains_response" | jq empty &>/dev/null; then
-                    if echo "$domains_response" | jq -e 'length > 0' &>/dev/null; then
-                        while read -r domain; do
-                            domains+=("$domain")
-                        done < <(echo "$domains_response" | jq -r '.[].domain')
-                        
-                        log_message "Retrieved $(echo "$domains_response" | jq 'length') domains from GoDaddy using shopper ID"
+                if [[ $count -gt 0 ]]; then
+                    while read -r domain; do
+                        domains+=("$domain")
+                    done < <(echo "$response" | jq -r '.[].domain')
+                    
+                    log_message "Retrieved $count domains from GoDaddy API (page $page)"
+                    
+                    # If we got less than the page size, we've reached the end
+                    if [[ $count -lt $PAGE_SIZE ]]; then
+                        break
                     fi
+                    
+                    # Update marker for next page
+                    marker=$(echo "$response" | jq -r '.[-1].domain')
+                    ((page++))
+                else
+                    log_message "No domains found on page $page, ending pagination"
+                    break
                 fi
+            elif [[ "$response_type" == "object" ]]; then
+                # It's an object with domain info - extract domain name if available
+                if echo "$response" | jq -e '.domain' &>/dev/null; then
+                    local domain=$(echo "$response" | jq -r '.domain')
+                    domains+=("$domain")
+                    log_message "Retrieved single domain from GoDaddy API: $domain"
+                    break
+                fi
+            else
+                log_message "Unexpected response type from GoDaddy API: $response_type"
+                break
             fi
+        else
+            log_message "Warning: Could not retrieve domains list from GoDaddy API directly"
+            break
+        fi
+    done
+    
+    # If no domains found via the domains API, try to use the domains from the Domain Pull directory
+    if [[ ${#domains[@]} -eq 0 ]]; then
+        log_message "No domains found via API, checking for domains in Domain Pull directory..."
+        local domain_pull_dir="$(cd "$script_dir" && cd "../Domain Pull" && pwd)"
+        local domains_md="$domain_pull_dir/GDdomain.md"
+        
+        if [[ -f "$domains_md" ]]; then
+            log_message "Using domains from GDdomain.md file in Domain Pull directory..."
+            # Extracting all active domains without the 1000 line limit
+            local active_domains=$(awk '/Domains and Their Statuses/{flag=1; next} flag && /ACTIVE/ {print $1}' "$domains_md" | awk -F'|' '{print $1}' | sed 's/ *$//' | sed 's/^ *//')
+            
+            if [[ -n "$active_domains" ]]; then
+                while IFS= read -r domain; do
+                    if [[ -n "$domain" && "$domain" != "Domain" && "$domain" != "---"* ]]; then
+                        domains+=("$domain")
+                    fi
+                done <<< "$active_domains"
+                log_message "Found $(echo "${domains[@]}" | wc -w) domains from Domain Pull directory"
+            fi
+        else
+            log_message "Domains file in Domain Pull directory not found"
         fi
     fi
     
-    # If all API methods failed, use the fallback list
+    # If still no domains found, use a limited number of domains from the fallback list to avoid excessive API calls
     if [[ ${#domains[@]} -eq 0 ]]; then
-        log_message "No domains found via API, using fallback domain list..."
-        while IFS= read -r domain; do
-            if [[ -n "$domain" ]]; then
-                domains+=("$domain")
+        log_message "No domains found from any source, using fallback domain list..."
+        
+        # Try to run the Domain Pull script to generate an updated list
+        log_message "Attempting to run the Domain Pull script to get fresh domain list..."
+        local domain_pull_script="$(cd "$script_dir" && cd "../Domain Pull" && pwd)/GDomains"
+        
+        if [[ -f "$domain_pull_script" && -x "$domain_pull_script" ]]; then
+            log_message "Running Domain Pull script to generate fresh domain list..."
+            (cd "$(dirname "$domain_pull_script")" && "$domain_pull_script" > /dev/null)
+            
+            # Now try again to read domains from the updated file
+            if [[ -f "$domains_md" ]]; then
+                log_message "Using domains from newly generated GDdomain.md file..."
+                # Extracting all active domains without the 1000 line limit
+                local active_domains=$(awk '/Domains and Their Statuses/{flag=1; next} flag && /ACTIVE/ {print $1}' "$domains_md" | awk -F'|' '{print $1}' | sed 's/ *$//' | sed 's/^ *//')
+                
+                if [[ -n "$active_domains" ]]; then
+                    domains=()
+                    while IFS= read -r domain; do
+                        if [[ -n "$domain" && "$domain" != "Domain" && "$domain" != "---"* ]]; then
+                            domains+=("$domain")
+                        fi
+                    done <<< "$active_domains"
+                    log_message "Found $(echo "${domains[@]}" | wc -w) domains from updated Domain Pull directory"
+                fi
             fi
-        done <<< "$IMPORTANT_DOMAINS"
+        else
+            log_message "Domain Pull script not found or not executable"
+        fi
+        
+        # If still no domains, use the hardcoded fallback list
+        if [[ ${#domains[@]} -eq 0 ]]; then
+            log_message "Still no domains found, using hardcoded fallback list"
+            # Use a limited number of domains to avoid excessive API calls
+            read -r -d '' IMPORTANT_DOMAINS << EOL
+100bestfonts.com
+linotype.com
+typography.com
+fontshop.com
+EOL
+            
+            while IFS= read -r domain; do
+                if [[ -n "$domain" ]]; then
+                    domains+=("$domain")
+                fi
+            done <<< "$IMPORTANT_DOMAINS"
+        fi
     fi
     
-    # Get total number of domains and log them
+    # Option to limit domains processed - removed limit to process all domains
+    # If you want to re-enable the limit, uncomment these lines:
+    # local domain_limit=20
+    # if [[ ${#domains[@]} -gt $domain_limit ]]; then
+    #     log_message "Limiting domains to $domain_limit to avoid excessive API calls"
+    #     domains=(${domains[@]:0:$domain_limit})
+    # fi
+    
     local total_domains=${#domains[@]}
     log_message "Found $total_domains domains in GoDaddy"
     
     if [[ $total_domains -eq 0 ]]; then
         log_message "No domains found. Check GoDaddy API credentials."
+        echo "[]" > "$godaddy_file"
         return
     fi
     
     # Log all domains we're processing
     log_message "Domains to process: ${domains[*]}"
-
+    
     # Now get DNS records for each domain
     local godaddy_assets="[]"
     local domain_count=0
@@ -363,44 +410,147 @@ EOL
     
     for domain in "${domains[@]}"; do
         ((domain_count++))
+        echo "Processing domain $domain_count/$total_domains: $domain"
         log_message "Fetching DNS records for $domain ($domain_count of $total_domains)..."
-        local dns_response
-        dns_response=$(curl -s -X GET \
-            -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
-            -H "Accept: application/json" \
-            "https://api.godaddy.com/v1/domains/$domain/records")
-
-        # Check if we hit the API quota limit
-        if echo "$dns_response" | grep -q "QUOTA_EXCEEDED"; then
-            quota_error_message=$(echo "$dns_response" | grep -o 'QUOTA_EXCEEDED.*' | tr -d '"{},' | sed 's/:/: /g')
-            log_message "Warning: GoDaddy API quota exceeded when fetching DNS records for $domain."
-            log_message "  - Error: $quota_error_message"
-            log_message "No more DNS records can be fetched until the quota resets."
-            quota_exceeded=true
-            break
-        elif [[ -n "$dns_response" ]]; then
-            local dns_response_type
-            dns_response_type=$(echo "$dns_response" | jq -r 'type' 2>/dev/null)
+        
+        # Add a small delay between domains to avoid rate limiting
+        if [[ $domain_count -gt 1 ]]; then
+            sleep 1
+        fi
+        
+        # Implement pagination for DNS records
+        local all_dns_records='[]'
+        local page=1
+        local has_more=true
+        
+        while $has_more; do
+            # Fetch DNS records with pagination
+            local dns_records_response
+            dns_records_response=$(curl -s -X GET \
+                -H "Authorization: sso-key $GODADDY_API_KEY:$GODADDY_API_SECRET" \
+                -H "Accept: application/json" \
+                "https://api.godaddy.com/v1/domains/$domain/records?offset=$(( (page-1) * 100 ))&limit=100")
             
-            if [[ "$dns_response_type" == "array" ]]; then
-                local formatted
-                formatted=$(format_godaddy_records "$dns_response" "$domain" "$today_date")
-                
-                if [[ "$formatted" != "[]" ]]; then
-                    echo "$godaddy_assets" > "$script_dir/tmp_assets.json"
-                    echo "$formatted" > "$script_dir/tmp_formatted.json"
-                    merge_json_files "$script_dir/tmp_assets.json" "$script_dir/tmp_formatted.json" "$script_dir/tmp_assets.json"
-                    godaddy_assets=$(cat "$script_dir/tmp_assets.json")
-                    rm -f "$script_dir/tmp_assets.json" "$script_dir/tmp_formatted.json"
-                    log_message "Successfully processed $(echo "$formatted" | jq 'length') DNS records for $domain"
-                else
-                    log_message "No valid DNS records found for $domain"
-                fi
+            # Check if we hit the API quota limit
+            if echo "$dns_records_response" | grep -q "QUOTA_EXCEEDED"; then
+                quota_error_message=$(echo "$dns_records_response" | grep -o 'QUOTA_EXCEEDED.*' | tr -d '"{},' | sed 's/:/: /g')
+                log_message "Warning: GoDaddy API quota exceeded when fetching records for $domain."
+                log_message "  - Error: $quota_error_message"
+                log_message "No more DNS records can be fetched until the quota resets."
+                echo "ERROR: GoDaddy API quota exceeded when fetching records for $domain."
+                quota_exceeded=true
+                break 2  # Break out of both loops
+            elif echo "$dns_records_response" | grep -q "TOO_MANY_REQUESTS"; then
+                log_message "Warning: Rate limit exceeded (TOO_MANY_REQUESTS) for $domain. Waiting and trying again."
+                echo "Rate limit hit for $domain. Waiting 30 seconds before continuing..."
+                sleep 30  # Wait 30 seconds before trying again
+                continue  # Try the same page again
+            fi
+            
+            # First check if response is a valid array (success case)
+            if echo "$dns_records_response" | jq -e 'type == "array"' &>/dev/null; then
+                # This is a valid array response, process it
+                :  # No-op, continue with processing below
             else
-                log_message "Warning: DNS response for $domain is not an array: $dns_response"
+                # This might be an error response, check for error code
+                local error_code
+                error_code=$(echo "$dns_records_response" | jq -r '.code // empty')
+                if [[ -n "$error_code" ]]; then
+                    local error_message
+                    error_message=$(echo "$dns_records_response" | jq -r '.message // "Unknown error"')
+                    
+                    if [[ "$error_code" == "UNKNOWN_DOMAIN" ]]; then
+                        log_message "Domain $domain not found in GoDaddy"
+                        echo "- Domain $domain not found in GoDaddy"
+                        break  # Move to next domain
+                    else
+                        log_message "Error: Failed to fetch DNS records for domain $domain: $error_code - $error_message"
+                        echo "✗ Error ($error_code) fetching DNS records for $domain"
+                        break  # Move to next domain
+                    fi
+                else
+                    # Neither a valid array nor a recognized error response
+                    log_message "Warning: Invalid response format for $domain"
+                    echo "✗ Invalid response format for $domain"
+                    break  # Move to next domain
+                fi
+            fi
+            
+            # Check if we got any records on this page
+            local page_count
+            page_count=$(echo "$dns_records_response" | jq 'length')
+            
+            if [[ $page_count -eq 0 ]]; then
+                has_more=false
+            else
+                # Merge with existing records
+                echo "$all_dns_records" > "$script_dir/tmp_all_dns.json"
+                echo "$dns_records_response" > "$script_dir/tmp_page_dns.json"
+                jq -s 'add' "$script_dir/tmp_all_dns.json" "$script_dir/tmp_page_dns.json" > "$script_dir/tmp_merged_dns.json"
+                all_dns_records=$(cat "$script_dir/tmp_merged_dns.json")
+                rm -f "$script_dir/tmp_all_dns.json" "$script_dir/tmp_page_dns.json" "$script_dir/tmp_merged_dns.json"
+                
+                # If we got less than 100 records, we're done with pagination
+                if [[ $page_count -lt 100 ]]; then
+                    has_more=false
+                else
+                    # Add small delay to avoid rate limiting
+                    sleep 0.5
+                    ((page++))
+                fi
+            fi
+        done
+        
+        # Process all the records for this domain
+        local record_count
+        record_count=$(echo "$all_dns_records" | jq 'length')
+        
+        if [[ $record_count -gt 0 ]]; then
+            # Format the records for our assets format
+            local formatted
+            formatted=$(format_godaddy_records "$all_dns_records" "$domain" "$today_date")
+            
+            if [[ "$formatted" != "[]" ]]; then
+                # Create temp files with proper JSON arrays
+                echo "$godaddy_assets" > "$script_dir/tmp_assets.json"
+                echo "$formatted" > "$script_dir/tmp_formatted.json"
+                
+                # Ensure both files are valid JSON arrays
+                ensure_json_array "$script_dir/tmp_assets.json"
+                ensure_json_array "$script_dir/tmp_formatted.json"
+                
+                # Properly merge the JSON arrays
+                jq -s 'add' "$script_dir/tmp_assets.json" "$script_dir/tmp_formatted.json" > "$script_dir/tmp_merged.json"
+                
+                # Verify the merged file is a valid JSON array
+                if jq empty "$script_dir/tmp_merged.json" 2>/dev/null; then
+                    godaddy_assets=$(cat "$script_dir/tmp_merged.json")
+                    record_count=$(echo "$formatted" | jq 'length')
+                    log_message "Successfully processed $record_count DNS records for $domain"
+                    echo "✓ Successfully processed $record_count DNS records for $domain"
+                else
+                    log_message "Warning: Error merging DNS records for $domain. Using original records."
+                    echo "✗ Error merging DNS records for $domain"
+                fi
+                
+                # Clean up temp files
+                rm -f "$script_dir/tmp_assets.json" "$script_dir/tmp_formatted.json" "$script_dir/tmp_merged.json"
+            else
+                log_message "No valid DNS records found for $domain"
+                echo "- No DNS records found for $domain"
+            fi
+        elif echo "$all_dns_records" | jq -e 'type == "object" and has("code")' &>/dev/null; then
+            local error_code=$(echo "$all_dns_records" | jq -r '.code')
+            if [[ "$error_code" == "UNKNOWN_DOMAIN" ]]; then
+                log_message "Domain $domain not found in GoDaddy"
+                echo "- Domain $domain not found in GoDaddy"
+            else
+                log_message "Warning: Error fetching DNS records for $domain: $error_code"
+                echo "✗ Error ($error_code) fetching DNS records for $domain"
             fi
         else
             log_message "Warning: Empty response when fetching DNS records for $domain"
+            echo "✗ Empty response for $domain"
         fi
     done
 
@@ -413,7 +563,7 @@ EOL
         if [[ -n "$quota_error_message" ]]; then
             log_message "Quota error details: $quota_error_message"
         fi
-        log_message "The output will only contain Cloudflare assets. GoDaddy assets: $(echo "$godaddy_assets" | jq 'length')"
+        log_message "The output will only contain partial GoDaddy assets. GoDaddy assets: $(echo "$godaddy_assets" | jq 'length')"
     else
         log_message "Saved $(echo "$godaddy_assets" | jq 'length') GoDaddy assets to $godaddy_file"
     fi
@@ -422,170 +572,283 @@ EOL
 # Fetch assets from Cloudflare
 fetch_cloudflare_assets() {
     log_message "Fetching assets from Cloudflare..."
+    
+    # Initialize variables
     local cloudflare_assets="[]"
+    local zones_json="[]"
+    local cache_valid=false
+    local cache_age_days=999
     
-    # Set API parameters
-    local account_id=""
-    local order="124"
-    local per_page=124
-    local dns_per_page=600
-    
-    # Create temp files
-    local zone_info_file="$script_dir/CloudflareZones.txt"
-    rm -f "$zone_info_file"
-    
-    # Check if we have a cached zones file that's less than 7 days old
-    local use_cache=false
-    local cache_age=999
-    
-    if [[ -f "$cloudflare_zones_cache" ]]; then
-        # Get file modification time and convert to seconds since epoch
-        local file_mod_time
-        file_mod_time=$(stat -f %m "$cloudflare_zones_cache" 2>/dev/null || stat -c %Y "$cloudflare_zones_cache" 2>/dev/null)
+    # Check if the Cloudflare zone cache exists and how old it is
+    if [[ -f "$cloudflare_zones_cache" ]] && jq empty "$cloudflare_zones_cache" &>/dev/null; then
+        # Check if the cache file is less than 7 days old
+        local cache_date=$(stat -f "%m" "$cloudflare_zones_cache")
+        local current_date=$(date +%s)
+        cache_age_days=$(( (current_date - cache_date) / 86400 ))
         
-        if [[ -n "$file_mod_time" ]]; then
-            local current_time
-            current_time=$(date +%s)
-            
-            # Calculate age in days
-            cache_age=$(( (current_time - file_mod_time) / 86400 ))
-            
-            if [[ $cache_age -lt 7 ]]; then
-                use_cache=true
-                log_message "Using cached Cloudflare zones ($cache_age days old)"
-            else
-                log_message "Cloudflare zones cache is $cache_age days old, refreshing"
-            fi
+        if [[ $cache_age_days -lt 7 ]]; then
+            cache_valid=true
+            log_message "Using cached Cloudflare zones ($cache_age_days days old)"
+        else
+            log_message "Cloudflare zones cache expired ($cache_age_days days old), will refresh"
         fi
+    else
+        log_message "No valid Cloudflare zones cache found, will create new one"
     fi
     
-    # If we're not using cache, fetch zones from the API
-    if [[ "$use_cache" == "false" ]]; then
-        # First check if we can get zones
+    # Fetch zones if needed
+    if [[ "$cache_valid" == "true" ]]; then
+        zones_json=$(cat "$cloudflare_zones_cache")
+        local zone_count=$(echo "$zones_json" | jq 'length')
+        log_message "Using $zone_count cached Cloudflare zones from cache ($cache_age_days days old)"
+        echo "Using $zone_count cached Cloudflare zones from cache ($cache_age_days days old)"
+    else
+        # First verify API connection before fetching all zones
         local test_response
         test_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?page=1&per_page=1" \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
-        
-        # Check if response has success field
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json")
+            
         if [[ -z "$test_response" ]] || ! echo "$test_response" | jq -e '.success' &>/dev/null; then
-            log_message "Error: Failed to connect to Cloudflare API. Response: $test_response"
+            local error_msg="Unknown error"
+            if [[ -n "$test_response" ]]; then
+                error_msg=$(echo "$test_response" | jq -r '.errors[0].message // "Unknown error"')
+            fi
+            
+            log_message "Error: Failed to connect to Cloudflare API: $error_msg"
+            echo "Error: Failed to connect to Cloudflare API: $error_msg"
             
             # If cache exists but is old, still use it as fallback
-            if [[ -f "$cloudflare_zones_cache" ]]; then
+            if [[ -f "$cloudflare_zones_cache" ]] && jq empty "$cloudflare_zones_cache" &>/dev/null; then
                 log_message "Using existing cache as fallback despite age"
-                use_cache=true
+                echo "Using existing cache as fallback despite age"
+                zones_json=$(cat "$cloudflare_zones_cache")
             else
+                log_message "No usable cache available, cannot retrieve Cloudflare assets"
+                echo "No usable cache available, cannot retrieve Cloudflare assets"
+                echo "[]" > "$cloudflare_file"
                 return
             fi
-        fi
-        
-        if [[ "$use_cache" == "false" ]]; then
-            # Get total number of zones directly from first page result
-            local total_zones
-            total_zones=$(echo "$test_response" | jq -r '.result_info.total_count // 0')
+        else
+            log_message "Fetching Cloudflare zones (cache expired or invalid)..."
+            echo "Fetching Cloudflare zones (cache expired or invalid)..."
+            local page=1
+            local has_more=true
             
-            if [[ -z "$total_zones" || "$total_zones" == "null" || "$total_zones" -eq 0 ]]; then
-                log_message "Warning: No zones found in Cloudflare or unable to determine total count"
-                # Still try to fetch in case the count is wrong but we can get zones
-                total_zones=1
-            fi
-            
-            log_message "Found $total_zones total zones in Cloudflare"
-            
-            # Calculate number of pages needed (minimum 1)
-            local total_pages=$(( (total_zones + per_page - 1) / per_page ))
-            if [[ $total_pages -lt 1 ]]; then
-                total_pages=1
-            fi
-            
-            # Create a JSON array to store zone information
-            echo "[]" > "$cloudflare_zones_cache.tmp"
-            
-            # Loop through each page
-            for ((page=1; page<=total_pages; page++)); do
-                log_message "Fetching zones - Page $page of $total_pages"
+            while [[ "$has_more" == "true" ]]; do
+                local zones_response
+                zones_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?page=$page&per_page=50" \
+                    -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                    -H "Content-Type: application/json")
                 
-                local cmd="curl -s -X GET \"https://api.cloudflare.com/client/v4/zones?page=$page&per_page=$per_page&order=$order\" -H \"Authorization: Bearer $CLOUDFLARE_API_TOKEN\""
-                
-                # Add account.id param if specified
-                if [[ -n "$account_id" ]]; then
-                    cmd="$cmd -H \"Content-Type: application/json\" -d '{\"account.id\":\"$account_id\"}'"
+                if [[ $? -ne 0 || -z "$zones_response" ]]; then
+                    log_message "Error: Failed to fetch Cloudflare zones on page $page"
+                    echo "Error: Failed to fetch Cloudflare zones on page $page"
+                    break
                 fi
                 
-                # Execute the command and extract zone IDs with domain names
-                local zone_data
-                zone_data=$(eval "$cmd")
+                if ! echo "$zones_response" | jq -e '.success' &>/dev/null; then
+                    error_msg=$(echo "$zones_response" | jq -r '.errors[0].message // "Unknown error"')
+                    log_message "Error: Cloudflare API error: $error_msg"
+                    echo "Error: Cloudflare API error: $error_msg"
+                    break
+                fi
                 
-                if [[ -n "$zone_data" ]] && echo "$zone_data" | jq -e '.success' &>/dev/null; then
-                    # Extract zone information and append to the cache file
-                    echo "$zone_data" | jq -r '.result[] | {id: .id, name: .name}' | jq -s '.' > "$cloudflare_zones_cache.tmp.page"
-                    
-                    # Merge with existing results
-                    jq -s '.[0] + .[1]' "$cloudflare_zones_cache.tmp" "$cloudflare_zones_cache.tmp.page" > "$cloudflare_zones_cache.tmp.merged"
-                    mv "$cloudflare_zones_cache.tmp.merged" "$cloudflare_zones_cache.tmp"
-                    rm -f "$cloudflare_zones_cache.tmp.page"
+                local page_zones=$(echo "$zones_response" | jq '.result')
+                local page_zone_count=$(echo "$page_zones" | jq 'length')
+                
+                if [[ $page_zone_count -eq 0 ]]; then
+                    has_more=false
                 else
-                    log_message "Warning: Failed to fetch zones for page $page"
+                    # Temporary files to help with merging
+                    echo "$zones_json" > "$script_dir/tmp_zones.json"
+                    echo "$page_zones" > "$script_dir/tmp_page_zones.json"
+                    
+                    # Merge existing zones with new ones
+                    jq -s 'add' "$script_dir/tmp_zones.json" "$script_dir/tmp_page_zones.json" > "$script_dir/tmp_merged_zones.json"
+                    zones_json=$(cat "$script_dir/tmp_merged_zones.json")
+                    
+                    # Clean up temp files
+                    rm -f "$script_dir/tmp_zones.json" "$script_dir/tmp_page_zones.json" "$script_dir/tmp_merged_zones.json"
+                    
+                    # Increment page and check if we should continue
+                    ((page++))
+                    has_more=$(echo "$zones_response" | jq -r '.result_info.has_more')
+                    
+                    log_message "Fetched $page_zone_count Cloudflare zones (page $((page-1)))"
+                    echo "Fetched $page_zone_count Cloudflare zones (page $((page-1)))"
                 fi
             done
             
-            # Move temporary cache to final location
-            mv "$cloudflare_zones_cache.tmp" "$cloudflare_zones_cache"
-            
-            # Also extract to the zone_info_file for processing
-            jq -r '.[] | .id + " " + .name' "$cloudflare_zones_cache" > "$zone_info_file"
-            
-            log_message "Cached $(jq 'length' "$cloudflare_zones_cache") Cloudflare zones for future use"
+            # Cache the zones for future use if we successfully fetched some
+            local total_zone_count=$(echo "$zones_json" | jq 'length')
+            if [[ $total_zone_count -gt 0 ]]; then
+                echo "$zones_json" > "$cloudflare_zones_cache"
+                log_message "Cached $total_zone_count Cloudflare zones for future use"
+                echo "Cached $total_zone_count Cloudflare zones for future use"
+            fi
         fi
     fi
     
-    # If we're using the cache, extract zone info to the processing file
-    if [[ "$use_cache" == "true" ]]; then
-        jq -r '.[] | .id + " " + .name' "$cloudflare_zones_cache" > "$zone_info_file"
-        local zone_count=$(wc -l < "$zone_info_file")
-        log_message "Using $zone_count cached Cloudflare zones from cache ($cache_age days old)"
-    fi
-    
-    # Check if we got any zone info
-    if [[ ! -s "$zone_info_file" ]]; then
-        log_message "Error: No zone information found. Check Cloudflare API token permissions."
+    # At this point we should have zones_json populated either from cache or fresh API calls
+    local zone_count=$(echo "$zones_json" | jq 'length')
+    if [[ $zone_count -eq 0 ]]; then
+        log_message "No Cloudflare zones found. Check API token permissions."
+        echo "No Cloudflare zones found. Check API token permissions."
+        echo "[]" > "$cloudflare_file"
         return
     fi
     
-    # Process each zone's DNS records
-    while IFS= read -r line; do
-        local zone_id zone_name
-        zone_id=$(echo "$line" | awk '{print $1}')
-        zone_name=$(echo "$line" | cut -d' ' -f2-)
+    # Process each zone to get DNS records
+    local cloudflare_assets="[]"
+    local zone_index=0
+    local total_zones=$(echo "$zones_json" | jq 'length')
+    local processed_records=0
+    
+    echo "Processing $total_zones Cloudflare zones..."
+    
+    for zone_data in $(echo "$zones_json" | jq -c '.[]'); do
+        ((zone_index++))
+        
+        local zone_name=$(echo "$zone_data" | jq -r '.name')
+        local zone_id=$(echo "$zone_data" | jq -r '.id')
         
         log_message "Fetching DNS records for zone $zone_name ($zone_id)"
         
-        local response
-        response=$(curl -s -X GET \
-            "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?page=1&per_page=$dns_per_page" \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
-            
-        if [[ -n "$response" ]] && echo "$response" | jq -e '.success' &>/dev/null; then
-            local formatted
-            formatted=$(format_cloudflare_records "$response" "$zone_name" "$today_date")
-            
-            if [[ "$formatted" != "[]" ]]; then
-                echo "$cloudflare_assets" > "$script_dir/tmp_assets.json"
-                echo "$formatted" > "$script_dir/tmp_formatted.json"
-                merge_json_files "$script_dir/tmp_assets.json" "$script_dir/tmp_formatted.json" "$script_dir/tmp_assets.json"
-                cloudflare_assets=$(cat "$script_dir/tmp_assets.json")
-                rm -f "$script_dir/tmp_assets.json" "$script_dir/tmp_formatted.json"
-            fi
-        else
-            log_message "Warning: Failed to fetch DNS records for zone $zone_name ($zone_id)"
+        # Show progress every 10 zones processed to avoid excessive terminal output
+        if (( zone_index % 10 == 0 )); then
+            echo "Progress: Processing zone $zone_index of $total_zones ($zone_name)"
         fi
-    done < "$zone_info_file"
+        
+        # Add small delay to avoid rate limiting
+        if [[ $zone_index -gt 1 ]]; then
+            sleep 0.5
+        fi
+        
+        # Initialize variables for pagination
+        local page=1
+        local all_dns_records='[]'
+        local total_record_count=0
+        local has_more=true
+        
+        while $has_more; do
+            log_message "Fetching DNS records page $page for zone $zone_name..."
+            
+            local dns_response
+            dns_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?per_page=100&page=$page" \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                -H "Content-Type: application/json")
+            
+            if [[ $? -ne 0 || -z "$dns_response" ]]; then
+                log_message "Error: Failed to fetch DNS records for zone $zone_name on page $page"
+                break
+            fi
+            
+            if ! echo "$dns_response" | jq -e '.success' &>/dev/null; then
+                error_msg=$(echo "$dns_response" | jq -r '.errors[0].message // "Unknown error"')
+                log_message "Error: Cloudflare API error for zone $zone_name on page $page: $error_msg"
+                break
+            fi
+            
+            local page_dns_records=$(echo "$dns_response" | jq '.result')
+            local page_record_count=$(echo "$page_dns_records" | jq 'length')
+            
+            if [[ $page_record_count -eq 0 ]]; then
+                # No more records to fetch
+                has_more=false
+            else
+                # Merge with the accumulated records
+                echo "$all_dns_records" > "$script_dir/tmp_all_cf_dns.json"
+                echo "$page_dns_records" > "$script_dir/tmp_page_cf_dns.json"
+                jq -s 'add' "$script_dir/tmp_all_cf_dns.json" "$script_dir/tmp_page_cf_dns.json" > "$script_dir/tmp_merged_cf_dns.json"
+                all_dns_records=$(cat "$script_dir/tmp_merged_cf_dns.json")
+                rm -f "$script_dir/tmp_all_cf_dns.json" "$script_dir/tmp_page_cf_dns.json" "$script_dir/tmp_merged_cf_dns.json"
+                
+                total_record_count=$((total_record_count + page_record_count))
+                
+                # Check if we should continue pagination
+                local total_count=$(echo "$dns_response" | jq -r '.result_info.total_count // 0')
+                local count=$(echo "$dns_response" | jq -r '.result_info.count // 0')
+                local per_page=$(echo "$dns_response" | jq -r '.result_info.per_page // 100')
+                
+                if [[ $count -lt $per_page ]] || [[ $total_count -le $((page * per_page)) ]]; then
+                    has_more=false
+                else
+                    ((page++))
+                    # Small delay to avoid hitting rate limits
+                    sleep 0.5
+                fi
+            fi
+        done
+        
+        local dns_records="$all_dns_records"
+        local record_count=$total_record_count
+        processed_records=$((processed_records + record_count))
+        
+        if [[ $record_count -gt 0 ]]; then
+            # Format the records for our assets format
+            # Properly handle each record individually to ensure valid JSON
+            local tmp_formatted_file="$script_dir/tmp_cf_formatted.json"
+            echo "[" > "$tmp_formatted_file"
+            
+            local first_item=true
+            echo "$dns_records" | jq -c '.[]' | while read -r record; do
+                local record_name=$(echo "$record" | jq -r '.name // "@"')
+                local record_type=$(echo "$record" | jq -r '.type')
+                local record_content=$(echo "$record" | jq -r '.content // "N/A"')
+                
+                # Create a valid JSON object for this record
+                local record_json
+                record_json=$(jq -n --arg name "$record_name" \
+                               --arg type "$record_type" \
+                               --arg data "$record_content" \
+                               --arg domain "$zone_name" \
+                               --arg source "Cloudflare" \
+                               --arg date "$today_date" \
+                               '{"name": $name, "type": $type, "data": $data, "domain": $domain, "source": $source, "discovery_date": $date}')
+                
+                # Add comma if not the first item
+                if $first_item; then
+                    first_item=false
+                else
+                    echo "," >> "$tmp_formatted_file"
+                fi
+                
+                # Append to the formatted file
+                echo "$record_json" >> "$tmp_formatted_file"
+            done
+            
+            # Close the JSON array
+            echo "]" >> "$tmp_formatted_file"
+            
+            # Ensure it's a valid JSON array
+            if ! jq empty "$tmp_formatted_file" 2>/dev/null; then
+                log_message "Warning: Invalid JSON created for zone $zone_name, using empty array"
+                echo "[]" > "$tmp_formatted_file"
+            fi
+            
+            # Merge with existing assets
+            echo "$cloudflare_assets" > "$script_dir/tmp_cf_assets.json"
+            
+            ensure_json_array "$script_dir/tmp_cf_assets.json"
+            ensure_json_array "$script_dir/tmp_cf_formatted.json"
+            
+            jq -s 'add' "$script_dir/tmp_cf_assets.json" "$script_dir/tmp_cf_formatted.json" > "$script_dir/tmp_cf_merged.json"
+            cloudflare_assets=$(cat "$script_dir/tmp_cf_merged.json")
+            
+            rm -f "$script_dir/tmp_cf_assets.json" "$script_dir/tmp_cf_formatted.json" "$script_dir/tmp_cf_merged.json"
+            
+            log_message "Successfully processed $record_count DNS records for Cloudflare zone $zone_name"
+        else
+            log_message "No DNS records found for Cloudflare zone $zone_name"
+        fi
+    done
     
-    # Clean up temporary file
-    rm -f "$zone_info_file"
+    echo "✓ Successfully processed $processed_records Cloudflare records across $total_zones zones"
     
-    # Save Cloudflare assets
+    # Save the Cloudflare assets
     echo "$cloudflare_assets" > "$cloudflare_file"
+    
     log_message "Saved $(echo "$cloudflare_assets" | jq 'length') Cloudflare assets to $cloudflare_file"
 }
 
