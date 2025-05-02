@@ -1,0 +1,324 @@
+#!/bin/bash
+
+# GoDaddy Asset Monitor
+# This script checks for new domains and subdomains discovered by GDomains and GDSubDomains
+# and sends email notifications when new assets are discovered
+
+# Usage: ./Email [--send-test]
+#   --send-test    Send a test email to verify configuration
+
+################################
+# Configuration (Edit These)   #
+################################
+
+# Email settings
+SMTP_SERVER="smtp.example.com"
+SMTP_PORT="587"
+SMTP_USER="your_email@example.com"
+SMTP_PASSWORD="your_password"
+FROM_EMAIL="notifications@yourdomain.com"
+TO_EMAIL="security@yourdomain.com"
+
+# Set path to parent directory
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+parent_dir="$(dirname "$script_dir")"
+
+# Path to domains history/tracking files
+domains_history_file="$parent_dir/Domain Pull/domains_history.json"
+domains_last_check_file="$script_dir/domains_last_check.json"
+
+# Path to subdomains history/tracking files
+assets_history_file="$parent_dir/Subdomain Pull/assets_history.json"
+assets_last_check_file="$script_dir/assets_last_check.json"
+
+# Log file
+log_file="$script_dir/email_monitor.log"
+
+# Number of new items to include in email (set to 0 for all)
+MAX_ITEMS_IN_EMAIL=25
+
+################################
+# Helper Functions             #
+################################
+
+# Log message to console and log file
+log_message() {
+    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "[$timestamp] $1" | tee -a "$log_file"
+}
+
+# Create directory if it doesn't exist
+ensure_dir() {
+    if [[ ! -d "$1" ]]; then
+        mkdir -p "$1"
+        log_message "Created directory: $1"
+    fi
+}
+
+# Send email with the provided subject and body
+send_email() {
+    local subject="$1"
+    local body="$2"
+    local html_flag="$3"
+    
+    # Default to plain text if html_flag is not specified
+    local content_type="text/plain"
+    if [[ "$html_flag" == "html" ]]; then
+        content_type="text/html"
+    fi
+    
+    log_message "Sending email with subject: $subject"
+    
+    # Using sendmail if available
+    if command -v sendmail &> /dev/null; then
+        (echo -e "Subject: $subject\nFrom: $FROM_EMAIL\nTo: $TO_EMAIL\nContent-Type: $content_type; charset=UTF-8\n\n$body") | sendmail -t
+        return $?
+    fi
+    
+    # Using mail command as fallback
+    if command -v mail &> /dev/null; then
+        echo -e "$body" | mail -s "$subject" -a "Content-Type: $content_type; charset=UTF-8" "$TO_EMAIL"
+        return $?
+    fi
+    
+    # Using curl as last resort if SMTP details are configured
+    if [[ -n "$SMTP_SERVER" && -n "$SMTP_PORT" && -n "$SMTP_USER" && -n "$SMTP_PASSWORD" ]]; then
+        # Create a temporary file for the email body
+        local tmp_email=$(mktemp)
+        cat > "$tmp_email" << EOF
+From: $FROM_EMAIL
+To: $TO_EMAIL
+Subject: $subject
+Content-Type: $content_type; charset=UTF-8
+
+$body
+EOF
+        
+        # Send email using curl
+        curl --ssl-reqd --url "smtps://$SMTP_SERVER:$SMTP_PORT" \
+             --mail-from "$FROM_EMAIL" \
+             --mail-rcpt "$TO_EMAIL" \
+             --user "$SMTP_USER:$SMTP_PASSWORD" \
+             --upload-file "$tmp_email"
+        
+        local status=$?
+        rm -f "$tmp_email"
+        return $status
+    fi
+    
+    log_message "ERROR: No email sending method available"
+    return 1
+}
+
+# Send a test email
+send_test_email() {
+    local subject="Test Email from GoDaddy Asset Monitor"
+    local body="This is a test email from the GoDaddy Asset Monitor script.\n\n"
+    body+="If you're receiving this, your email configuration is working correctly.\n\n"
+    body+="Script location: $script_dir\n"
+    body+="Timestamp: $(date)"
+    
+    send_email "$subject" "$body"
+    local status=$?
+    
+    if [[ $status -eq 0 ]]; then
+        log_message "Test email sent successfully"
+    else
+        log_message "ERROR: Failed to send test email (code: $status)"
+    fi
+    
+    exit $status
+}
+
+# Check if a file exists and is valid JSON
+ensure_valid_json_file() {
+    local file_path="$1"
+    local init_content="$2"
+    
+    # Create file with initial content if it doesn't exist
+    if [[ ! -f "$file_path" ]]; then
+        echo "$init_content" > "$file_path"
+        log_message "Created new file: $file_path"
+    fi
+    
+    # Validate JSON and reset if invalid
+    if ! jq empty "$file_path" 2>/dev/null; then
+        log_message "WARNING: Invalid JSON in $file_path, resetting"
+        echo "$init_content" > "$file_path"
+    fi
+}
+
+################################
+# Domain Monitoring Functions  #
+################################
+
+# Check for new domains and generate notification
+check_new_domains() {
+    log_message "Checking for new domains..."
+    
+    # Ensure history files exist and are valid
+    ensure_valid_json_file "$domains_history_file" "[]"
+    ensure_valid_json_file "$domains_last_check_file" "[]"
+    
+    # If domains_history_file doesn't exist or is empty, no data to process
+    if [[ ! -s "$domains_history_file" ]]; then
+        log_message "No domain history file found or file is empty. Skipping domain check."
+        return 0
+    fi
+    
+    # Use jq to find new domains (comparing with last check)
+    new_domains=$(jq --slurpfile last "$domains_last_check_file" '
+        # Get domains from last check
+        ($last[0] // []) as $previous |
+        ($previous | map(.domain) | sort) as $prev_domains |
+        
+        # Get current domains with today as discovery date
+        (map(.domain) | sort) as $curr_domains |
+        
+        # Find domains in current but not in previous
+        . | map(select(.domain as $d | $prev_domains | index($d) | not))
+    ' "$domains_history_file")
+    
+    # Count of new domains
+    new_domain_count=$(echo "$new_domains" | jq 'length')
+    
+    if [[ "$new_domain_count" -gt 0 ]]; then
+        log_message "Found $new_domain_count new domain(s)"
+        
+        # Create email subject
+        local subject="[GoDaddy Monitor] $new_domain_count New Domain(s) Discovered"
+        
+        # Create email body
+        local body="The GoDaddy Domain Monitor has detected $new_domain_count new domain(s):\n\n"
+        
+        # Add domain list to email
+        if [[ $MAX_ITEMS_IN_EMAIL -gt 0 && $new_domain_count -gt $MAX_ITEMS_IN_EMAIL ]]; then
+            # Limited list
+            local domain_list=$(echo "$new_domains" | jq -r --arg max "$MAX_ITEMS_IN_EMAIL" 'limit($max | tonumber; .[]) | "- " + .domain + " (" + .status + ") - Found on " + .discovery_date')
+            body+="$domain_list\n\n...(and $(($new_domain_count - $MAX_ITEMS_IN_EMAIL)) more)\n\n"
+        else
+            # Full list
+            local domain_list=$(echo "$new_domains" | jq -r '.[] | "- " + .domain + " (" + .status + ") - Found on " + .discovery_date')
+            body+="$domain_list\n\n"
+        fi
+        
+        body+="Full details are available in the domains_history.json file.\n"
+        body+="Timestamp: $(date)"
+        
+        # Send notification email
+        send_email "$subject" "$body"
+    else
+        log_message "No new domains found"
+    fi
+    
+    # Update last check file
+    cp "$domains_history_file" "$domains_last_check_file"
+}
+
+################################
+# Subdomain Monitoring Functions #
+################################
+
+# Check for new subdomains and generate notification
+check_new_subdomains() {
+    log_message "Checking for new subdomains..."
+    
+    # Ensure history files exist and are valid
+    ensure_valid_json_file "$assets_history_file" "[]"
+    ensure_valid_json_file "$assets_last_check_file" "[]"
+    
+    # If assets_history_file doesn't exist or is empty, no data to process
+    if [[ ! -s "$assets_history_file" ]]; then
+        log_message "No asset history file found or file is empty. Skipping subdomain check."
+        return 0
+    fi
+    
+    # Use jq to find new assets (comparing with last check)
+    new_assets=$(jq --slurpfile last "$assets_last_check_file" '
+        # Get assets from last check
+        ($last[0] // []) as $previous |
+        ($previous | map(.asset_id) | sort) as $prev_assets |
+        
+        # Get current assets
+        (map(.asset_id) | sort) as $curr_assets |
+        
+        # Find assets in current but not in previous
+        . | map(select((.asset_id != null) and (.asset_id as $id | $prev_assets | index($id) | not)))
+    ' "$assets_history_file")
+    
+    # Count of new assets
+    new_asset_count=$(echo "$new_assets" | jq 'length')
+    
+    if [[ "$new_asset_count" -gt 0 ]]; then
+        log_message "Found $new_asset_count new DNS record(s)"
+        
+        # Create email subject
+        local subject="[GoDaddy Monitor] $new_asset_count New DNS Record(s) Discovered"
+        
+        # Create HTML email body
+        local body="<html><body>"
+        body+="<h2>New DNS Records Discovered</h2>"
+        body+="<p>The GoDaddy DNS Monitor has detected <strong>$new_asset_count</strong> new DNS record(s):</p>"
+        
+        # Add asset table to email
+        body+="<table border='1' style='border-collapse: collapse; width: 100%;'>"
+        body+="<tr style='background-color: #f2f2f2;'>"
+        body+="<th style='padding: 8px; text-align: left;'>Domain</th>"
+        body+="<th style='padding: 8px; text-align: left;'>Name</th>"
+        body+="<th style='padding: 8px; text-align: left;'>Type</th>"
+        body+="<th style='padding: 8px; text-align: left;'>Data</th>"
+        body+="<th style='padding: 8px; text-align: left;'>Source</th>"
+        body+="<th style='padding: 8px; text-align: left;'>Discovery Date</th>"
+        body+="</tr>"
+        
+        # Get records for the table (limited or full)
+        local asset_rows
+        if [[ $MAX_ITEMS_IN_EMAIL -gt 0 && $new_asset_count -gt $MAX_ITEMS_IN_EMAIL ]]; then
+            # Limited list
+            asset_rows=$(echo "$new_assets" | jq -r --arg max "$MAX_ITEMS_IN_EMAIL" 'limit($max | tonumber; .[]) | "<tr><td>" + .domain + "</td><td>" + .name + "</td><td>" + .type + "</td><td>" + .data + "</td><td>" + .source + "</td><td>" + .discovery_date + "</td></tr>"')
+            body+="$asset_rows"
+            body+="<tr><td colspan='6' style='text-align: center; padding: 8px;'><em>...and $(($new_asset_count - $MAX_ITEMS_IN_EMAIL)) more records</em></td></tr>"
+        else
+            # Full list
+            asset_rows=$(echo "$new_assets" | jq -r '.[] | "<tr><td>" + .domain + "</td><td>" + .name + "</td><td>" + .type + "</td><td>" + .data + "</td><td>" + .source + "</td><td>" + .discovery_date + "</td></tr>"')
+            body+="$asset_rows"
+        fi
+        
+        body+="</table>"
+        body+="<p>Full details are available in the assets_history.json file.</p>"
+        body+="<p><small>Timestamp: $(date)</small></p>"
+        body+="</body></html>"
+        
+        # Send notification email (HTML format)
+        send_email "$subject" "$body" "html"
+    else
+        log_message "No new DNS records found"
+    fi
+    
+    # Update last check file
+    cp "$assets_history_file" "$assets_last_check_file"
+}
+
+################################
+# Main Execution               #
+################################
+
+# Create the Serve directory if it doesn't exist
+ensure_dir "$script_dir"
+
+# Initialize log file
+echo "--- GoDaddy Asset Monitor Log $(date) ---" > "$log_file"
+log_message "Script started"
+
+# Process command line arguments
+if [[ "$1" == "--send-test" ]]; then
+    send_test_email
+    exit $?
+fi
+
+# Check for new domains and subdomains
+check_new_domains
+check_new_subdomains
+
+log_message "Script completed successfully"
+exit 0
