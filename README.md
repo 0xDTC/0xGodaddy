@@ -16,10 +16,12 @@ This script retrieves a list of all domains associated with your GoDaddy account
 **Features:**
 - Fetches all domains linked to your GoDaddy account.
 - Displays domain details in a user-friendly format.
+- Generates both Markdown and interactive HTML output.
+- Interactive HTML report includes filtering, sorting, and CSV export functionality.
 
 **Usage:**
 1. **Configuration:** Ensure your GoDaddy API key and secret are set as environment variables or modify the script to include them directly.
-2. **Execution:** Run the script to display your domain information.
+2. **Execution:** Run the script to display your domain information and generate output files in both Markdown and HTML formats.
 
 **Prerequisites:**
 - Bash shell environment.
@@ -33,15 +35,17 @@ This script retrieves a list of all domains associated with your GoDaddy account
 **Directory:** `Subdomain Pull`
 
 **Description:**  
-This script retrieves all subdomains for a specified domain in your GoDaddy account. It’s helpful for managing DNS records and understanding your domain’s substructure.
+This script retrieves all subdomains for specified domains in your GoDaddy account and Cloudflare. It’s helpful for managing DNS records and understanding your domain’s substructure.
 
 **Features:**
-- Fetches subdomains for a specified domain.
-- Displays subdomain details in a clear format.
+- Fetches domains from GoDaddy and retrieves DNS records from both GoDaddy and Cloudflare.
+- Processes and merges data from both providers.
+- Generates comprehensive asset documentation in both Markdown and HTML formats.
+- Interactive HTML report with filtering, sorting, and CSV export functionality.
 
 **Usage:**
-1. **Configuration:** Set your GoDaddy API key and secret as environment variables or include them in the script.
-2. **Execution:** Run the script with the target domain as an argument to display its subdomains.
+1. **Configuration:** Set your GoDaddy API key and secret and Cloudflare API token in the `secret.txt` file.
+2. **Execution:** Run the script to retrieve all domains, subdomains, and generate comprehensive documentation.
 
 **Prerequisites:**
 - Bash shell environment.
@@ -72,7 +76,16 @@ cd 0xGodaddy/'Subdomain Pull'
 
 4. **Execute the Script:**
 ```bash
-./script_name.sh
+# For Domain Pull
+./GDomains
+
+# For Subdomain Pull (with optional logging)
+./GDSubDomains [-l]
 ```
+
+4. **View Output:**
+After execution, each script generates:
+- A Markdown (.md) file with a structured view of the data
+- An HTML file with interactive features including filtering, sorting, and CSV export
 
 For more detailed information, refer to the individual README files located within each script’s subdirectory.

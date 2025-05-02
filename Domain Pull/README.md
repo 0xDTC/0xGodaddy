@@ -2,7 +2,7 @@
 ___
 # Domain Fetch Script by **0xDTC**
 
-This script, developed by 0xDTC, fetches domain data from the GoDaddy API and aggregates it into a single JSON file. It dynamically identifies and counts all domain statuses, ensuring flexibility for future additions.
+This script, developed by 0xDTC, fetches domain data from the GoDaddy API and aggregates it into a single JSON file. It dynamically identifies and counts all domain statuses, ensuring flexibility for future additions. The script generates both Markdown and interactive HTML output for easy viewing and analysis.
 
 ## Features
 
@@ -10,6 +10,21 @@ This script, developed by 0xDTC, fetches domain data from the GoDaddy API and ag
 2. **Dynamic Aggregation:** Automatically identifies and counts all unique domain statuses.
 3. **Pagination Support:** Handles large datasets by managing API pagination seamlessly.
 4. **Human-Readable Output:** Generates a clear summary of domain statuses directly in the terminal.
+5. **Interactive HTML Report:** Creates an HTML file with sortable tables, search filters, and CSV export functionality.
+6. **Markdown Documentation:** Generates a clean markdown file for quick reference and sharing.
+
+## Data Flow Diagram
+
+```mermaid
+flowchart TD
+    A[GoDaddy API] -->|Domain Data| B[Domain Retrieval with Pagination]
+    B -->|Merged JSON| C[JSON Processing]
+    C -->|Status Analysis| D[Status Aggregation]
+    D -->|Domain List| E[Output Generation]
+    E -->|Markdown| F[GDdomain.md]
+    E -->|Interactive HTML| G[GDdomain.html]
+    E -->|Terminal| H[Console Output]
+```
 
 ## Prerequisites
 
@@ -51,8 +66,11 @@ This script, developed by 0xDTC, fetches domain data from the GoDaddy API and ag
     ```
 
 ### Step 4: Review Output
-- The fetched domains will be saved in `domains.json`.
-- A dynamic summary of domain statuses will be printed to the terminal:
+- The fetched domains will be temporarily saved in `domains.json` (deleted after processing).
+- A dynamic summary of domain statuses will be printed to the terminal.
+- Two output files will be generated:
+  - `GDdomain.md`: Markdown format of domain data
+  - `GDdomain.html`: Interactive HTML report with filtering and sorting capabilities
 
 #### Counts of Domains by Status:
 ```
@@ -66,7 +84,7 @@ Domains fetched successfully.
 ## Configuration Options
 
 - **PAGE_SIZE:** Adjust the number of domains fetched per API request by modifying the `PAGE_SIZE` variable in the script.
-- **Output File:** Change the name or path of the output file by editing the `output_file` variable.
+- **Output Files:** Change the name or path of the output files by editing the `output_file`, `markdown_file`, and `html_file` variables.
 
 ## Error Handling
 
@@ -89,19 +107,32 @@ ACTIVE                   : 1138
 CANCELLED                : 76
 PENDING_TRANSFER         : 24
 EXPIRED_REASSIGNED       : 1
-Domains fetched successfully.
+Output saved to:
+- /path/to/GDdomain.md (Markdown format)
+- /path/to/GDdomain.html (HTML format)
 ```
 
-### JSON File (`domains.json`):
-```json
-[
-  {
-    "domain": "example1.com",
-    "status": "ACTIVE"
-  },
-  {
-    "domain": "example2.com",
-    "status": "CANCELLED"
-  }
-]
+### Markdown File (`GDdomain.md`):
+```markdown
+Counts of Domains by Status:
+-----------------------------
+ACTIVE                   : 1138
+CANCELLED                : 76
+PENDING_TRANSFER         : 24
+EXPIRED_REASSIGNED       : 1
+
+Domains and Their Statuses:
+---------------------------------------
+Domain                                   | Status              
+---------------------------------------  | --------------------
+example1.com                             | ACTIVE              
+example2.com                             | CANCELLED           
 ```
+
+### HTML Output (`GDdomain.html`):
+The HTML output provides an interactive web interface with the following features:
+- Sortable columns (click on column headers)
+- Search/filter functionality for each column
+- Export to CSV button
+- Responsive design for mobile and desktop viewing
+- Clean, modern styling

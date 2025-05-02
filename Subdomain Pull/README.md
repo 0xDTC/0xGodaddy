@@ -2,7 +2,7 @@
 
 # Organization Assets Generator
 
-Automates domain and subdomain retrieval from GoDaddy and Cloudflare, then generates comprehensive asset documentation in both Markdown and HTML formats.
+Automates domain and subdomain retrieval from GoDaddy and Cloudflare, then generates comprehensive asset documentation in both Markdown and HTML formats. The interactive HTML report provides advanced features for analyzing and managing your domain assets.
 
 ## Features
 - Fetch domains from GoDaddy API with robust pagination support
