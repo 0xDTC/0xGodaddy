@@ -10,10 +10,23 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 output_file="$script_dir/domains.json"
 markdown_file="$script_dir/GDdomain.md"
 html_file="$script_dir/GDdomain.html"
+history_file="$script_dir/domains_history.json"
+today_date=$(date +"%Y-%m-%d")
 
 # Initialize the output file with an empty array
 echo "[]" > "$output_file"
 > "$markdown_file"
+
+# Ensure history file exists and is valid JSON
+if [[ ! -f "$history_file" ]] || [[ ! -s "$history_file" ]]; then
+    echo "[]" > "$history_file"
+fi
+
+# Validate the history file
+if ! jq empty "$history_file" 2>/dev/null; then
+    echo "History file was invalid JSON, resetting it..."
+    echo "[]" > "$history_file"
+fi
 
 while true; do
     # Fetch the domains data
@@ -41,6 +54,47 @@ while true; do
     marker=$(jq -r '.[-1].domain' <<< "$response")
 done
 
+# Process domains to add discovery dates
+tmp_processed=$(mktemp)
+
+# Create a simple list of domains from the existing history file
+history_domains=$(jq -r 'map({(.domain): .discovery_date}) | add' "$history_file" 2>/dev/null)
+if [[ $? -ne 0 ]]; then
+    # If there's an error with the jq command, reset the history
+    echo "Error processing history, resetting..."
+    echo "[]" > "$history_file"
+    history_domains="{}"
+fi
+
+# For each domain in the current fetch, add discovery date
+jq --arg today "$today_date" --argjson history "$history_domains" '
+    map(. + {
+        discovery_date: ($history[.domain] // $today)
+    })
+' "$output_file" > "$tmp_processed"
+
+# Update the output file with the processed data
+mv "$tmp_processed" "$output_file"
+
+# Update history file with current domains and their discovery dates
+jq -n --arg today "$today_date" --slurpfile current "$output_file" --slurpfile history "$history_file" '
+    # Combine existing history and new domains
+    ($history[0] // []) as $old_history |
+    ($current[0] // []) as $domains |
+    
+    # Create a map of existing domain:date from history
+    ($old_history | map({key: .domain, value: .discovery_date}) | from_entries) as $history_map |
+    
+    # For each domain in current, use history date if exists, otherwise today
+    $domains | map({
+        domain: .domain,
+        discovery_date: ($history_map[.domain] // $today)
+    })
+' > "$tmp_processed"
+
+# Update the history file
+mv "$tmp_processed" "$history_file"
+
 # Print and write counts of statuses
 echo "Counts of Domains by Status:" | tee -a "$markdown_file"
 echo "-----------------------------" | tee -a "$markdown_file"
@@ -49,14 +103,14 @@ jq -r '.[].status' "$output_file" | sort | uniq -c | while read -r count status;
     printf "%-25s: %d\n" "$status" "$count" | tee -a "$markdown_file"
 done
 
-# Print and write table of domains with statuses
+# Print and write table of domains with statuses and discovery dates
 echo -e "\nDomains and Their Statuses:" | tee -a "$markdown_file"
-echo "---------------------------------------" | tee -a "$markdown_file"
-printf "%-40s | %-20s\n" "Domain" "Status" | tee -a "$markdown_file"
-printf "%-40s | %-20s\n" "---------------------------------------" "--------------------" | tee -a "$markdown_file"
+echo "-----------------------------------------------------------------------" | tee -a "$markdown_file"
+printf "%-40s | %-20s | %-15s\n" "Domain" "Status" "Discovery Date" | tee -a "$markdown_file"
+printf "%-40s | %-20s | %-15s\n" "---------------------------------------" "--------------------" "---------------" | tee -a "$markdown_file"
 
-jq -r '.[] | [.domain, .status] | @tsv' "$output_file" | while IFS=$'\t' read -r domain status; do
-    printf "%-40s | %-20s\n" "$domain" "$status" | tee -a "$markdown_file"
+jq -r '.[] | [.domain, .status, .discovery_date] | @tsv' "$output_file" | while IFS=$'\t' read -r domain status discovery_date; do
+    printf "%-40s | %-20s | %-15s\n" "$domain" "$status" "$discovery_date" | tee -a "$markdown_file"
 done
 
 # Generate HTML output
@@ -83,8 +137,9 @@ done
     echo "        .filter-controls button { padding: 8px 16px; margin-right: 10px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }"
     echo "        .filter-controls button:hover { background-color: #3e8e41; }"
     echo "        /* Column widths */"
-    echo "        th:nth-child(1), td:nth-child(1) { width: 60%; } /* Domain */"
-    echo "        th:nth-child(2), td:nth-child(2) { width: 40%; } /* Status */"
+    echo "        th:nth-child(1), td:nth-child(1) { width: 45%; } /* Domain */"
+    echo "        th:nth-child(2), td:nth-child(2) { width: 30%; } /* Status */"
+    echo "        th:nth-child(3), td:nth-child(3) { width: 25%; } /* Discovery Date */"
     echo "    </style>"
     echo "</head>"
     echo "<body>"
@@ -109,18 +164,21 @@ done
     echo "                <tr>"
     echo "                    <th onclick='sortTable(0)'>Domain</th>"
     echo "                    <th onclick='sortTable(1)'>Status</th>"
+    echo "                    <th onclick='sortTable(2)'>Discovery Date</th>"
     echo "                </tr>"
     echo "                <tr class='filter-row'>"
     echo "                    <td><input type='text' onkeyup='filterTable()' placeholder='Filter domain...'></td>"
     echo "                    <td><input type='text' onkeyup='filterTable()' placeholder='Filter status...'></td>"
+    echo "                    <td><input type='text' onkeyup='filterTable()' placeholder='Filter date...'></td>"
     echo "                </tr>"
     echo "            </thead>"
     echo "            <tbody>"
     
-    jq -r '.[] | [.domain, .status] | @tsv' "$output_file" | while IFS=$'	' read -r domain status; do
+    jq -r '.[] | [.domain, .status, .discovery_date] | @tsv' "$output_file" | while IFS=$'\t' read -r domain status discovery_date; do
         echo "            <tr>"
         echo "                <td>$domain</td>"
         echo "                <td>$status</td>"
+        echo "                <td>$discovery_date</td>"
         echo "            </tr>"
     done
     

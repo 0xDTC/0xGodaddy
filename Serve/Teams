@@ -1,0 +1,350 @@
+#!/bin/bash
+
+# GoDaddy Asset Monitor - Microsoft Teams Notification
+# This script checks for new domains and subdomains discovered by GDomains and GDSubDomains
+# and sends Microsoft Teams notifications when new assets are discovered
+
+# Usage: ./Teams [--send-test]
+#   --send-test    Send a test message to verify configuration
+
+################################
+# Configuration (Edit These)   #
+################################
+
+# Microsoft Teams webhook URL
+# Create a webhook URL in Teams: Channel -> ... -> Connectors -> Incoming Webhook -> Configure
+TEAMS_WEBHOOK_URL="https://yourcompany.webhook.office.com/webhookb2/your-webhook-url"
+
+# Set path to parent directory
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+parent_dir="$(dirname "$script_dir")"
+
+# Path to domains history/tracking files
+domains_history_file="$parent_dir/Domain Pull/domains_history.json"
+domains_last_check_file="$script_dir/domains_last_check_teams.json"
+
+# Path to subdomains history/tracking files
+assets_history_file="$parent_dir/Subdomain Pull/assets_history.json"
+assets_last_check_file="$script_dir/assets_last_check_teams.json"
+
+# Log file
+log_file="$script_dir/teams_monitor.log"
+
+# Number of new items to include in Teams message (set to 0 for all)
+MAX_ITEMS_IN_MESSAGE=15
+
+################################
+# Helper Functions             #
+################################
+
+# Log message to console and log file
+log_message() {
+    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "[$timestamp] $1" | tee -a "$log_file"
+}
+
+# Create directory if it doesn't exist
+ensure_dir() {
+    if [[ ! -d "$1" ]]; then
+        mkdir -p "$1"
+        log_message "Created directory: $1"
+    fi
+}
+
+# Send message to Microsoft Teams
+send_teams_message() {
+    local title="$1"
+    local text="$2"
+    local sections="$3"
+    local color="$4"
+    
+    # Default color if not specified
+    if [[ -z "$color" ]]; then
+        color="0076D7" # Default Microsoft Teams blue
+    fi
+    
+    log_message "Sending Teams message: $title"
+    
+    # Prepare JSON payload (Microsoft Teams Adaptive Card format)
+    local payload='{"@type":"MessageCard","@context":"http://schema.org/extensions","themeColor":"'"$color"'","summary":"'"$title"'","sections":[{"activityTitle":"'"$title"'","activitySubtitle":"'"$(date)"'","activityImage":"https://cdn.statuspage.io/dkuglq3dcs64/assets/9v8vxjzg9m3g/media_attachments/files/000/000/224/original/godaddy.png","text":"'"$text"'"}'
+    
+    # Add sections if provided
+    if [[ -n "$sections" ]]; then
+        payload+=",$sections"
+    fi
+    
+    # Close the payload
+    payload+="]}"
+    
+    # Send payload to Teams webhook
+    response=$(curl -s -X POST -H "Content-Type: application/json" --data "$payload" "$TEAMS_WEBHOOK_URL")
+    
+    # Check response - Teams webhooks return empty response on success
+    if [[ -z "$response" ]]; then
+        log_message "Teams message sent successfully"
+        return 0
+    else
+        log_message "ERROR: Failed to send Teams message: $response"
+        return 1
+    fi
+}
+
+# Send a test Teams message
+send_test_message() {
+    local title="🛰️ Test Message from GoDaddy Asset Monitor"
+    local text="If you're seeing this, your Microsoft Teams webhook configuration is working correctly.<br>Script location: $script_dir<br>Timestamp: $(date)"
+    
+    send_teams_message "$title" "$text"
+    local status=$?
+    
+    if [[ $status -eq 0 ]]; then
+        log_message "Test message sent successfully"
+    else
+        log_message "ERROR: Failed to send test message"
+    fi
+    
+    exit $status
+}
+
+# Check if a file exists and is valid JSON
+ensure_valid_json_file() {
+    local file_path="$1"
+    local init_content="$2"
+    
+    # Create file with initial content if it doesn't exist
+    if [[ ! -f "$file_path" ]]; then
+        echo "$init_content" > "$file_path"
+        log_message "Created new file: $file_path"
+    fi
+    
+    # Validate JSON and reset if invalid
+    if ! jq empty "$file_path" 2>/dev/null; then
+        log_message "WARNING: Invalid JSON in $file_path, resetting"
+        echo "$init_content" > "$file_path"
+    fi
+}
+
+################################
+# Domain Monitoring Functions  #
+################################
+
+# Check for new domains and generate Teams notification
+check_new_domains() {
+    log_message "Checking for new domains..."
+    
+    # Ensure history files exist and are valid
+    ensure_valid_json_file "$domains_history_file" "[]"
+    ensure_valid_json_file "$domains_last_check_file" "[]"
+    
+    # If domains_history_file doesn't exist or is empty, no data to process
+    if [[ ! -s "$domains_history_file" ]]; then
+        log_message "No domain history file found or file is empty. Skipping domain check."
+        return 0
+    fi
+    
+    # Use jq to find new domains (comparing with last check)
+    new_domains=$(jq --slurpfile last "$domains_last_check_file" '
+        # Get domains from last check
+        ($last[0] // []) as $previous |
+        ($previous | map(.domain) | sort) as $prev_domains |
+        
+        # Get current domains
+        (map(.domain) | sort) as $curr_domains |
+        
+        # Find domains in current but not in previous
+        . | map(select(.domain as $d | $prev_domains | index($d) | not))
+    ' "$domains_history_file")
+    
+    # Count of new domains
+    new_domain_count=$(echo "$new_domains" | jq 'length')
+    
+    if [[ "$new_domain_count" -gt 0 ]]; then
+        log_message "Found $new_domain_count new domain(s)"
+        
+        # Create title and summary text
+        local title="🔔 $new_domain_count New Domain(s) Discovered"
+        local text="The GoDaddy Domain Monitor has detected <strong>$new_domain_count</strong> new domain(s).<br><br>"
+        
+        # Add domain details as facts in a section
+        local domain_section='{"title":"New Domains","facts":["
+        
+        # Generate the domain facts for Teams card
+        local domain_facts=""
+        local count=0
+        
+        # Create facts array with domain information
+        echo "$new_domains" | jq -c '.[]' | while read -r domain_json; do
+            # Extract domain properties
+            domain_name=$(echo "$domain_json" | jq -r '.domain')
+            domain_status=$(echo "$domain_json" | jq -r '.status')
+            discovery_date=$(echo "$domain_json" | jq -r '.discovery_date')
+            
+            # Add separator between facts
+            if [[ $count -gt 0 ]]; then
+                domain_facts+=","
+            fi
+            
+            # Add this domain as a fact
+            domain_facts+="{\"name\":\"$domain_name\",\"value\":\"Status: $domain_status<br>Found on: $discovery_date\"}"
+            
+            count=$((count + 1))
+            
+            # Check if we've reached the max items limit
+            if [[ $MAX_ITEMS_IN_MESSAGE -gt 0 && $count -ge $MAX_ITEMS_IN_MESSAGE ]]; then
+                if [[ $new_domain_count -gt $MAX_ITEMS_IN_MESSAGE ]]; then
+                    # Add a fact for the remaining items
+                    domain_facts+=",{\"name\":\"...\",\"value\":\"And $(($new_domain_count - $MAX_ITEMS_IN_MESSAGE)) more domains...\"}"
+                fi
+                break
+            fi
+        done
+        
+        # Complete the section
+        domain_section+="$domain_facts"],"markdown":true}"
+        
+        # Send Teams notification
+        send_teams_message "$title" "$text" "$domain_section" "FF9F1C" # Orange color for domains
+    else
+        log_message "No new domains found"
+    fi
+    
+    # Update last check file
+    cp "$domains_history_file" "$domains_last_check_file"
+}
+
+################################
+# Subdomain Monitoring Functions #
+################################
+
+# Check for new subdomains and generate Teams notification
+check_new_subdomains() {
+    log_message "Checking for new subdomains..."
+    
+    # Ensure history files exist and are valid
+    ensure_valid_json_file "$assets_history_file" "[]"
+    ensure_valid_json_file "$assets_last_check_file" "[]"
+    
+    # If assets_history_file doesn't exist or is empty, no data to process
+    if [[ ! -s "$assets_history_file" ]]; then
+        log_message "No asset history file found or file is empty. Skipping subdomain check."
+        return 0
+    fi
+    
+    # Use jq to find new assets (comparing with last check)
+    new_assets=$(jq --slurpfile last "$assets_last_check_file" '
+        # Get assets from last check
+        ($last[0] // []) as $previous |
+        ($previous | map(.asset_id) | sort) as $prev_assets |
+        
+        # Get current assets
+        (map(.asset_id) | sort) as $curr_assets |
+        
+        # Find assets in current but not in previous
+        . | map(select((.asset_id != null) and (.asset_id as $id | $prev_assets | index($id) | not)))
+    ' "$assets_history_file")
+    
+    # Count of new assets
+    new_asset_count=$(echo "$new_assets" | jq 'length')
+    
+    if [[ "$new_asset_count" -gt 0 ]]; then
+        log_message "Found $new_asset_count new DNS record(s)"
+        
+        # Create title and summary text
+        local title="📡 $new_asset_count New DNS Record(s) Discovered"
+        local text="The GoDaddy DNS Monitor has detected <strong>$new_asset_count</strong> new DNS record(s).<br><br>"
+        
+        # Group assets by domain for better organization
+        domains_list=$(echo "$new_assets" | jq -r '.[] | .domain' | sort | uniq)
+        
+        # Create sections for each domain
+        local all_sections=""
+        
+        for domain in $domains_list; do
+            # Get records for this domain
+            domain_records=$(echo "$new_assets" | jq -r --arg domain "$domain" 'map(select(.domain == $domain))')
+            record_count=$(echo "$domain_records" | jq 'length')
+            
+            # Create a section for this domain with facts for each record
+            local domain_section='{"title":"Domain: '$domain' ('$record_count' new records)","facts":["
+            
+            # Generate facts for this domain's records
+            local record_facts=""
+            local count=0
+            
+            # Process each record for this domain
+            echo "$domain_records" | jq -c '.[]' | while read -r record_json; do
+                # Extract record properties
+                name=$(echo "$record_json" | jq -r '.name')
+                type=$(echo "$record_json" | jq -r '.type')
+                data=$(echo "$record_json" | jq -r '.data')
+                source=$(echo "$record_json" | jq -r '.source')
+                discovery_date=$(echo "$record_json" | jq -r '.discovery_date')
+                
+                # Format record name for display
+                if [[ "$name" == "@" ]]; then
+                    display_name="$domain (root)"
+                else
+                    display_name="$name"
+                fi
+                
+                # Add separator between facts
+                if [[ $count -gt 0 ]]; then
+                    record_facts+=","
+                fi
+                
+                # Add this record as a fact
+                record_facts+="{\"name\":\"$display_name ($type)\",\"value\":\"Data: $data<br>Source: $source<br>Found on: $discovery_date\"}"
+                
+                count=$((count + 1))
+            done
+            
+            # Complete the section
+            domain_section+="$record_facts"],"markdown":true}"
+            
+            # Add separator between sections
+            if [[ -n "$all_sections" ]]; then
+                all_sections+=","
+            fi
+            
+            all_sections+="$domain_section"
+        done
+        
+        # Send Teams notification
+        send_teams_message "$title" "$text" "$all_sections" "007FFF" # Blue color for DNS records
+    else
+        log_message "No new DNS records found"
+    fi
+    
+    # Update last check file
+    cp "$assets_history_file" "$assets_last_check_file"
+}
+
+################################
+# Main Execution               #
+################################
+
+# Create the Serve directory if it doesn't exist
+ensure_dir "$script_dir"
+
+# Initialize log file
+echo "--- GoDaddy Asset Monitor (Teams) Log $(date) ---" > "$log_file"
+log_message "Script started"
+
+# Verify Teams webhook is configured
+if [[ -z "$TEAMS_WEBHOOK_URL" || "$TEAMS_WEBHOOK_URL" == "https://yourcompany.webhook.office.com/webhookb2/your-webhook-url" ]]; then
+    log_message "ERROR: Microsoft Teams webhook URL not configured. Please edit the script and set TEAMS_WEBHOOK_URL."
+    exit 1
+fi
+
+# Process command line arguments
+if [[ "$1" == "--send-test" ]]; then
+    send_test_message
+    exit $?
+fi
+
+# Check for new domains and subdomains
+check_new_domains
+check_new_subdomains
+
+log_message "Script completed successfully"
+exit 0

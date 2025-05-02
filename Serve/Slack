@@ -1,0 +1,395 @@
+#!/bin/bash
+
+# GoDaddy Asset Monitor - Slack Notification
+# This script checks for new domains and subdomains discovered by GDomains and GDSubDomains
+# and sends Slack notifications when new assets are discovered
+
+# Usage: ./Slack [--send-test]
+#   --send-test    Send a test message to verify configuration
+
+################################
+# Configuration (Edit These)   #
+################################
+
+# Slack webhook URL
+# Create a webhook URL at: https://api.slack.com/messaging/webhooks
+SLACK_WEBHOOK_URL="https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+
+# Slack channel to post to (optional, will use webhook default if not specified)
+SLACK_CHANNEL="#security-alerts"
+
+# Slack username to post as (optional)
+SLACK_USERNAME="GoDaddy Monitor"
+
+# Slack emoji icon (optional)
+SLACK_ICON_EMOJI=":satellite_antenna:"
+
+# Set path to parent directory
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+parent_dir="$(dirname "$script_dir")"
+
+# Path to domains history/tracking files
+domains_history_file="$parent_dir/Domain Pull/domains_history.json"
+domains_last_check_file="$script_dir/domains_last_check_slack.json"
+
+# Path to subdomains history/tracking files
+assets_history_file="$parent_dir/Subdomain Pull/assets_history.json"
+assets_last_check_file="$script_dir/assets_last_check_slack.json"
+
+# Log file
+log_file="$script_dir/slack_monitor.log"
+
+# Number of new items to include in Slack message (set to 0 for all)
+MAX_ITEMS_IN_MESSAGE=15
+
+################################
+# Helper Functions             #
+################################
+
+# Log message to console and log file
+log_message() {
+    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "[$timestamp] $1" | tee -a "$log_file"
+}
+
+# Create directory if it doesn't exist
+ensure_dir() {
+    if [[ ! -d "$1" ]]; then
+        mkdir -p "$1"
+        log_message "Created directory: $1"
+    fi
+}
+
+# Send message to Slack
+send_slack_message() {
+    local text="$1"
+    local blocks="$2"
+    
+    log_message "Sending Slack message"
+    
+    # Prepare JSON payload
+    local payload="{"
+    
+    # Add text (fallback for notifications)
+    payload+="\"text\": \"$text\""
+    
+    # Add blocks if provided
+    if [[ -n "$blocks" ]]; then
+        payload+=", \"blocks\": $blocks"
+    fi
+    
+    # Add channel if specified
+    if [[ -n "$SLACK_CHANNEL" ]]; then
+        payload+=", \"channel\": \"$SLACK_CHANNEL\""
+    fi
+    
+    # Add username if specified
+    if [[ -n "$SLACK_USERNAME" ]]; then
+        payload+=", \"username\": \"$SLACK_USERNAME\""
+    fi
+    
+    # Add icon emoji if specified
+    if [[ -n "$SLACK_ICON_EMOJI" ]]; then
+        payload+=", \"icon_emoji\": \"$SLACK_ICON_EMOJI\""
+    fi
+    
+    payload+="}"
+    
+    # Send payload to Slack webhook
+    response=$(curl -s -X POST -H "Content-type: application/json" --data "$payload" "$SLACK_WEBHOOK_URL")
+    
+    # Check response
+    if [[ "$response" == "ok" ]]; then
+        log_message "Slack message sent successfully"
+        return 0
+    else
+        log_message "ERROR: Failed to send Slack message: $response"
+        return 1
+    fi
+}
+
+# Send a test Slack message
+send_test_message() {
+    local text="🛰️ *Test Message from GoDaddy Asset Monitor*\nIf you're seeing this, your Slack webhook configuration is working correctly.\nScript location: $script_dir\nTimestamp: $(date)"
+    
+    send_slack_message "$text"
+    local status=$?
+    
+    if [[ $status -eq 0 ]]; then
+        log_message "Test message sent successfully"
+    else
+        log_message "ERROR: Failed to send test message"
+    fi
+    
+    exit $status
+}
+
+# Check if a file exists and is valid JSON
+ensure_valid_json_file() {
+    local file_path="$1"
+    local init_content="$2"
+    
+    # Create file with initial content if it doesn't exist
+    if [[ ! -f "$file_path" ]]; then
+        echo "$init_content" > "$file_path"
+        log_message "Created new file: $file_path"
+    fi
+    
+    # Validate JSON and reset if invalid
+    if ! jq empty "$file_path" 2>/dev/null; then
+        log_message "WARNING: Invalid JSON in $file_path, resetting"
+        echo "$init_content" > "$file_path"
+    fi
+}
+
+################################
+# Domain Monitoring Functions  #
+################################
+
+# Check for new domains and generate Slack notification
+check_new_domains() {
+    log_message "Checking for new domains..."
+    
+    # Ensure history files exist and are valid
+    ensure_valid_json_file "$domains_history_file" "[]"
+    ensure_valid_json_file "$domains_last_check_file" "[]"
+    
+    # If domains_history_file doesn't exist or is empty, no data to process
+    if [[ ! -s "$domains_history_file" ]]; then
+        log_message "No domain history file found or file is empty. Skipping domain check."
+        return 0
+    fi
+    
+    # Use jq to find new domains (comparing with last check)
+    new_domains=$(jq --slurpfile last "$domains_last_check_file" '
+        # Get domains from last check
+        ($last[0] // []) as $previous |
+        ($previous | map(.domain) | sort) as $prev_domains |
+        
+        # Get current domains
+        (map(.domain) | sort) as $curr_domains |
+        
+        # Find domains in current but not in previous
+        . | map(select(.domain as $d | $prev_domains | index($d) | not))
+    ' "$domains_history_file")
+    
+    # Count of new domains
+    new_domain_count=$(echo "$new_domains" | jq 'length')
+    
+    if [[ "$new_domain_count" -gt 0 ]]; then
+        log_message "Found $new_domain_count new domain(s)"
+        
+        # Create message text
+        local text="🔔 *$new_domain_count New Domain(s) Discovered*"
+        
+        # Create blocks for nice formatting
+        local blocks='[
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "🔔 New Domain(s) Discovered",
+                    "emoji": true
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "The GoDaddy Domain Monitor has detected *'"$new_domain_count"'* new domain(s)."
+                }
+            },
+            {
+                "type": "divider"
+            }'
+        
+        # Add domain list to blocks
+        local domain_text=""
+        
+        if [[ $MAX_ITEMS_IN_MESSAGE -gt 0 && $new_domain_count -gt $MAX_ITEMS_IN_MESSAGE ]]; then
+            # Limited list
+            local domain_list=$(echo "$new_domains" | jq -r --arg max "$MAX_ITEMS_IN_MESSAGE" 'limit($max | tonumber; .[]) | "• *" + .domain + "* (" + .status + ") - Found on " + .discovery_date')
+            domain_text="$domain_list\n\n_...and $(($new_domain_count - $MAX_ITEMS_IN_MESSAGE)) more domains._"
+        else
+            # Full list
+            local domain_list=$(echo "$new_domains" | jq -r '.[] | "• *" + .domain + "* (" + .status + ") - Found on " + .discovery_date')
+            domain_text="$domain_list"
+        fi
+        
+        blocks+=',
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "'"$domain_text"'"
+                }
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "_'"$(date)"'_"
+                    }
+                ]
+            }'
+        
+        blocks+='\n]'
+        
+        # Send Slack notification
+        send_slack_message "$text" "$blocks"
+    else
+        log_message "No new domains found"
+    fi
+    
+    # Update last check file
+    cp "$domains_history_file" "$domains_last_check_file"
+}
+
+################################
+# Subdomain Monitoring Functions #
+################################
+
+# Check for new subdomains and generate Slack notification
+check_new_subdomains() {
+    log_message "Checking for new subdomains..."
+    
+    # Ensure history files exist and are valid
+    ensure_valid_json_file "$assets_history_file" "[]"
+    ensure_valid_json_file "$assets_last_check_file" "[]"
+    
+    # If assets_history_file doesn't exist or is empty, no data to process
+    if [[ ! -s "$assets_history_file" ]]; then
+        log_message "No asset history file found or file is empty. Skipping subdomain check."
+        return 0
+    fi
+    
+    # Use jq to find new assets (comparing with last check)
+    new_assets=$(jq --slurpfile last "$assets_last_check_file" '
+        # Get assets from last check
+        ($last[0] // []) as $previous |
+        ($previous | map(.asset_id) | sort) as $prev_assets |
+        
+        # Get current assets
+        (map(.asset_id) | sort) as $curr_assets |
+        
+        # Find assets in current but not in previous
+        . | map(select((.asset_id != null) and (.asset_id as $id | $prev_assets | index($id) | not)))
+    ' "$assets_history_file")
+    
+    # Count of new assets
+    new_asset_count=$(echo "$new_assets" | jq 'length')
+    
+    if [[ "$new_asset_count" -gt 0 ]]; then
+        log_message "Found $new_asset_count new DNS record(s)"
+        
+        # Create message text
+        local text="📡 *$new_asset_count New DNS Record(s) Discovered*"
+        
+        # Create blocks for nice formatting
+        local blocks='[
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "📡 New DNS Record(s) Discovered",
+                    "emoji": true
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "The GoDaddy DNS Monitor has detected *'"$new_asset_count"'* new DNS record(s)."
+                }
+            },
+            {
+                "type": "divider"
+            }'
+        
+        # Group subdomains by domain for cleaner presentation
+        domains_list=$(echo "$new_assets" | jq -r '.[] | .domain' | sort | uniq)
+        
+        # For each domain, list its new records
+        for domain in $domains_list; do
+            # Get new records for this domain
+            domain_records=$(echo "$new_assets" | jq -r --arg domain "$domain" 'map(select(.domain == $domain))')
+            record_count=$(echo "$domain_records" | jq 'length')
+            
+            # Create a section for this domain
+            blocks+=',
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Domain: '"$domain"'* - '"$record_count"' new record(s)"
+                }
+            }'
+            
+            # Add records for this domain
+            local record_text=""
+            local records=$(echo "$domain_records" | jq -r '.[] | "• " + .name + " (" + .type + ") → " + .data + " [" + .source + ", " + .discovery_date + "]"')
+            record_text="$records"
+            
+            blocks+=',
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "'"$record_text"'"
+                }
+            }'
+        done
+        
+        blocks+=',
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": "_'"$(date)"'_"
+                    }
+                ]
+            }'
+        
+        blocks+='\n]'
+        
+        # Send Slack notification
+        send_slack_message "$text" "$blocks"
+    else
+        log_message "No new DNS records found"
+    fi
+    
+    # Update last check file
+    cp "$assets_history_file" "$assets_last_check_file"
+}
+
+################################
+# Main Execution               #
+################################
+
+# Create the Serve directory if it doesn't exist
+ensure_dir "$script_dir"
+
+# Initialize log file
+echo "--- GoDaddy Asset Monitor (Slack) Log $(date) ---" > "$log_file"
+log_message "Script started"
+
+# Verify Slack webhook is configured
+if [[ -z "$SLACK_WEBHOOK_URL" || "$SLACK_WEBHOOK_URL" == "https://hooks.slack.com/services/YOUR/WEBHOOK/URL" ]]; then
+    log_message "ERROR: Slack webhook URL not configured. Please edit the script and set SLACK_WEBHOOK_URL."
+    exit 1
+fi
+
+# Process command line arguments
+if [[ "$1" == "--send-test" ]]; then
+    send_test_message
+    exit $?
+fi
+
+# Check for new domains and subdomains
+check_new_domains
+check_new_subdomains
+
+log_message "Script completed successfully"
+exit 0

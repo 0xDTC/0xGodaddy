@@ -52,6 +52,7 @@ cloudflare_file="$script_dir/cloudflare_assets.json"
 merged_file="$script_dir/org_assets.json"
 markdown_file="$script_dir/Org-Assets.md"
 html_file="$script_dir/Org-Assets.html"
+assets_history_file="$script_dir/assets_history.json"
 # Cloudflare zone cache file
 cloudflare_zones_cache="$script_dir/cloudflare_zones_cache.json"
 
@@ -65,7 +66,21 @@ log_message() {
     echo "$1" | tee -a "$log_file"
 }
 
-# Check API connectivity for both providers
+# Ensure history file exists and is valid JSON
+if [[ ! -f "$assets_history_file" ]] || [[ ! -s "$assets_history_file" ]]; then
+    log_message "Creating new assets history file..."
+    echo "[]" > "$assets_history_file"
+fi
+
+# Validate the history file
+if ! jq empty "$assets_history_file" 2>/dev/null; then
+    log_message "History file was invalid JSON, resetting it..."
+    echo "[]" > "$assets_history_file"
+fi
+
+#####################
+# API Connectivity   #
+#####################
 check_api_connectivity() {
     log_message "Checking API connectivity..."
     
@@ -943,6 +958,49 @@ generate_asset_documentation() {
     
     # Merge GoDaddy and Cloudflare assets
     merge_json_files "$godaddy_file" "$cloudflare_file" "$merged_file"
+    
+    # Create a temporary file for processed assets
+    tmp_processed=$(mktemp)
+    
+    # Process assets to preserve original discovery dates from history
+    log_message "Processing discovery dates from history..."
+    
+    # Create a unique identifier for each asset (domain+name+type+data)
+    # Then check if it exists in history to preserve its original discovery date
+    jq --arg today "$today_date" --slurpfile history "$assets_history_file" '
+        # Create a function to generate a unique ID for each record
+        def asset_id(asset): asset.domain + "::" + asset.name + "::" + asset.type + "::" + asset.data;
+        
+        # Convert history to a map for easier lookup
+        ($history[0] // []) as $old_records |
+        ($old_records | map({key: asset_id(.), value: .discovery_date}) | from_entries) as $history_map |
+        
+        # For each current asset, check history and use original date if found
+        map(. + {
+            asset_id: asset_id(.),
+            discovery_date: ($history_map[asset_id(.)] // $today)
+        })
+    ' "$merged_file" > "$tmp_processed"
+    
+    # Update the merged file with processed data
+    mv "$tmp_processed" "$merged_file"
+    
+    # Update history file with current assets and their discovery dates
+    jq --slurpfile current "$merged_file" '
+        # Get existing assets from history
+        . as $existing_history |
+        
+        # Get current assets
+        ($current[0] // []) as $current_assets |
+        
+        # Combine them, ensuring no duplicates
+        ($existing_history + $current_assets) |
+        unique_by(.asset_id) |
+        sort_by(.domain, .name)
+    ' "$assets_history_file" > "$tmp_processed"
+    
+    mv "$tmp_processed" "$assets_history_file"
+    log_message "Updated assets history file with $(jq length "$assets_history_file") unique records."
     
     # Check if GoDaddy assets are empty (likely due to quota being exceeded)
     local godaddy_count
