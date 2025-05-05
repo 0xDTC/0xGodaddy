@@ -676,8 +676,8 @@ fetch_cloudflare_assets() {
                     has_more=false
                 else
                     # Temporary files to help with merging
-                    echo "$zones_json" > "$script_dir/tmp_zones.json"
-                    echo "$page_zones" > "$script_dir/tmp_page_zones.json"
+                    printf '%s\n' "$zones_json" > "$script_dir/tmp_zones.json"
+                    printf '%s\n' "$page_zones" > "$script_dir/tmp_page_zones.json"
                     
                     # Merge existing zones with new ones
                     jq -s 'add' "$script_dir/tmp_zones.json" "$script_dir/tmp_page_zones.json" > "$script_dir/tmp_merged_zones.json"
@@ -773,8 +773,8 @@ fetch_cloudflare_assets() {
                 has_more=false
             else
                 # Merge with the accumulated records
-                echo "$all_dns_records" > "$script_dir/tmp_all_cf_dns.json"
-                echo "$page_dns_records" > "$script_dir/tmp_page_cf_dns.json"
+                printf '%s\n' "$all_dns_records" > "$script_dir/tmp_all_cf_dns.json"
+                printf '%s\n' "$page_dns_records" > "$script_dir/tmp_page_cf_dns.json"
                 jq -s 'add' "$script_dir/tmp_all_cf_dns.json" "$script_dir/tmp_page_cf_dns.json" > "$script_dir/tmp_merged_cf_dns.json"
                 all_dns_records=$(cat "$script_dir/tmp_merged_cf_dns.json")
                 rm -f "$script_dir/tmp_all_cf_dns.json" "$script_dir/tmp_page_cf_dns.json" "$script_dir/tmp_merged_cf_dns.json"
@@ -830,7 +830,7 @@ fetch_cloudflare_assets() {
                 fi
                 
                 # Append to the formatted file
-                echo "$record_json" >> "$tmp_formatted_file"
+                printf '%s\n' "$record_json" >> "$tmp_formatted_file"
             done
             
             # Close the JSON array
