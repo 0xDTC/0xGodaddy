@@ -41,8 +41,10 @@ while true; do
     # Create a temporary file
     tmp_file=$(mktemp)
 
-    # Merge with the output file
-    jq -s '.[0] + .[1]' "$output_file" <(echo "$response") > "$tmp_file" && mv "$tmp_file" "$output_file"
+    # Merge with the output file - use printf instead of echo for better Windows compatibility
+    printf '%s\n' "$response" > "${tmp_file}.part"
+    jq -s '.[0] + .[1]' "$output_file" "${tmp_file}.part" > "$tmp_file" && mv "$tmp_file" "$output_file"
+    rm -f "${tmp_file}.part"
 
     # Check if the number of domains fetched is less than PAGE_SIZE
     count=$(jq 'length' <<< "$response")
