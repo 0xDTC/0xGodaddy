@@ -1,0 +1,226 @@
+/* Custom DataTable styling */
+:root {
+    --bg: #1d1f23;
+    --fg: #e5e7eb;
+    --accent: #3b82f6;
+    --h: #2d3035;
+    --alt: #24262b;
+    --rm: #7f1d1d40;
+}
+
+body {
+    font: 15px/1.45 system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+}
+
+header {
+    max-width: 1600px;
+    margin: auto;
+    padding: 2rem 1.5rem 0;
+}
+
+h1 {
+    margin: .2em 0;
+    font-size: 1.9rem;
+    color: var(--accent);
+}
+
+main {
+    max-width: 1600px;
+    margin: auto;
+    padding: 0 1.5rem 3rem;
+}
+
+.table-container {
+    margin: 1rem 0;
+    border: 1px solid #333;
+    border-radius: 6px;
+    background: #111;
+    padding: 0.5rem;
+    overflow-x: auto;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+th, td {
+    border: 1px solid #333;
+    padding: .35rem .55rem;
+    vertical-align: top;
+}
+
+th {
+    background: var(--h);
+    position: relative;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+th::after {
+    content: "⇕";
+    opacity: 0.3;
+    margin-left: 5px;
+    font-size: 0.8em;
+}
+
+th.sorting-asc::after {
+    content: "↑";
+    opacity: 1;
+}
+
+th.sorting-desc::after {
+    content: "↓";
+    opacity: 1;
+}
+
+tr:nth-child(even) td {
+    background: var(--alt);
+}
+
+tr.removed td {
+    background: var(--rm);
+}
+
+td:nth-child(4) {
+    max-width: 560px;
+    word-break: break-all;
+}
+
+code {
+    background: #374151;
+    padding: .1rem .35rem;
+    border-radius: 4px;
+}
+
+.filter-container {
+    margin: 2px 0;
+    width: 100%;
+}
+
+.filter-row th {
+    font-weight: normal;
+    background: #1d2024;
+    padding: 5px 6px;
+    cursor: default;
+    border-top: none;
+    text-align: center;
+}
+
+.filter-row th::after,
+.filter-cell::after {
+    content: none !important;
+    display: none !important;
+}
+
+.filter-cell {
+    padding: 4px;
+    position: relative;
+}
+
+/* Hide ALL indicators and numbers in filter row */
+.filter-row *, .filter-cell * {
+    counter-increment: none !important;
+}
+
+.filter-row::after,
+.filter-row::before,
+.filter-row *::after,
+.filter-row *::before,
+.filter-cell::after,
+.filter-cell::before {
+    display: none !important;
+    content: none !important;
+    counter-increment: none !important;
+}
+
+/* Remove any numbers that might be shown from CSS counters */
+thead tr.filter-row {
+    counter-reset: none !important;
+    counter-increment: none !important;
+}
+
+table td::before, table th::before {
+    counter-increment: none !important;
+}
+
+.column-filter, #globalSearch {
+    background: #1f2937;
+    border: 1px solid #4b5563;
+    color: #d1d5db;
+    font-size: 13px;
+    border-radius: 4px;
+    padding: 6px 8px;
+    width: 100%;
+    outline: none;
+    box-sizing: border-box;
+}
+
+.column-filter:focus, #globalSearch:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.4);
+}
+
+#globalSearch {
+    margin-bottom: 1rem;
+    width: 400px;
+    padding: 8px 12px;
+    font-size: 15px;
+}
+
+.pagination {
+    display: flex;
+    list-style: none;
+    padding: 0;
+    margin: 1rem 0;
+    justify-content: center;
+}
+
+.pagination button {
+    background: #2d3035;
+    border: 1px solid #4b5563;
+    color: #d1d5db;
+    border-radius: 4px;
+    padding: 5px 10px;
+    margin: 0 2px;
+    cursor: pointer;
+}
+
+.pagination button:hover {
+    background: #3b82f6;
+    color: white;
+}
+
+.pagination button.active {
+    background: #3b82f6;
+    color: white;
+}
+
+.table-info {
+    margin: 10px 0;
+    font-size: 0.9em;
+    text-align: right;
+}
+
+.page-size-container {
+    margin-left: 1rem;
+}
+
+.hidden {
+    display: none;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1200px) {
+    .table-container {
+        overflow-x: auto;
+    }
+    
+    table {
+        min-width: 1000px;
+    }
+}
