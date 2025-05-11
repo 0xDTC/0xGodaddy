@@ -22,7 +22,7 @@ from dotenv import dotenv_values
 from requests.exceptions import RequestException
 
 # ───────────── paths / CLI
-ENV_FILE   = pathlib.Path(r"../secrets.txt")
+ENV_FILE   = pathlib.Path(r"/media/sf_main/Scripts/0xGodaddy/Subdomain Pull/.env")
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 DATA_DIR   = SCRIPT_DIR / "data"; DATA_DIR.mkdir(exist_ok=True)
 MASTER_JSON = DATA_DIR / "dns_records_master.json"
@@ -55,8 +55,16 @@ except KeyError as e:
 GD_HEADERS = {"Authorization": f"sso-key {GD_KEY}:{GD_SECRET}"}
 CF_HEADERS = {"Authorization": f"Bearer {CF_TOKEN}"}
 
+# Standard browser user-agent to avoid API blocking
+STANDARD_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+
 session = requests.Session()
-session.headers.update({"User-Agent": "dns-inventory/1.7"})
+session.headers.update({"User-Agent": STANDARD_USER_AGENT})
+
+# Set default timeout for all requests (60 seconds - increased to avoid timeouts)
+REQUEST_TIMEOUT = 60  # seconds
+MAX_RETRIES = 5       # increased number of retries for failed requests
+BACKOFF_FACTOR = 1.5  # exponential backoff factor between retries
 
 # ───────────── spinner
 _spin = False
@@ -86,6 +94,25 @@ def sig(r: DNSRecord) -> str:
     return "|".join(str(r[k]) for k in
                     ("domain", "subdomain", "type", "data", "source"))
 
+def is_test_domain(domain: str) -> bool:
+    """Check if domain is a test/example domain that should be filtered out."""
+    test_domains = [
+        "example.com", "example.org", "example.net",
+        "test.com", "test.org", "test.net",
+        "domain.com", "domain.org", "domain.net",
+        "localhost", "invalid", "example", "test"
+    ]
+    
+    # Check exact matches
+    if domain.lower() in test_domains:
+        return True
+    
+    # Check for common test patterns
+    if domain.startswith("test-") or domain.startswith("example-"):
+        return True
+        
+    return False
+
 # More specific type definitions for different API responses
 GodaddyDomainRecord = TypedDict('GodaddyDomainRecord', {'domain': str})
 GodaddyDNSRecord = TypedDict('GodaddyDNSRecord', {
@@ -107,40 +134,193 @@ def paginate(url: str, hdr: dict[str, str], label: str,
              ) -> Generator[GodaddyOrCloudflareResponse, None, None]:
     """Yield successive pages; understands GoDaddy ‘Link’ & CF ‘result_info’."""
     page = 1
+    retry_count = 0
+    params_dict = dict(params or {})
+    
     while url:
-        with spin():
-            resp = session.get(url, headers=hdr, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        # Fix for "Argument type is partially unknown"
-        if isinstance(data, list):
-            count = len(data)
-        else:
-            # Create a properly typed empty list as default
-            default_empty: List[Any] = []
-            result = data.get("result", default_empty)
-            # Ensure result is actually a list
-            if not isinstance(result, list):
-                result = default_empty
-            count = len(result)
-        info(f"{label} page {page}: {count} items")
-        yield data
+        try:
+            with spin():
+                resp = session.get(url, headers=hdr, params=params_dict, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            # Reset retry count on success
+            retry_count = 0
+            # Fix for "Argument type is partially unknown"
+            if isinstance(data, list):
+                count = len(data)
+            else:
+                # Create a properly typed empty list as default
+                default_empty: List[Any] = []
+                result = data.get("result", default_empty)
+                # Ensure result is actually a list
+                if not isinstance(result, list):
+                    result = default_empty
+                count = len(result)
+            info(f"{label} page {page}: {count} items")
+            yield data
 
-        nxt: Optional[str] = None
-        if "Link" in resp.headers and 'rel="next"' in resp.headers["Link"]:
-            nxt = resp.headers["Link"].split(";")[0].strip(" <>")
-        elif isinstance(data, dict) and "result_info" in data:
-            result_info = cast(Dict[str, int], data["result_info"])
-            if page < result_info["total_pages"]:
-                nxt = url
-                params = dict(params or {})
-                params["page"] = page + 1
-        url = nxt or ""  # Ensure url is always a string
-        if not url:  # Break the loop if url is empty
-            break
-        page += 1
+            nxt: Optional[str] = None
+            if "Link" in resp.headers and 'rel="next"' in resp.headers["Link"]:
+                nxt = resp.headers["Link"].split(";")[0].strip(" <>")
+            elif isinstance(data, dict) and "result_info" in data:
+                result_info = cast(Dict[str, int], data["result_info"])
+                if page < result_info["total_pages"]:
+                    nxt = url
+                    params_dict["page"] = page + 1
+            url = nxt or ""  # Ensure url is always a string
+            if not url:  # Break the loop if url is empty
+                break
+            page += 1
+            
+        except RequestException as e:
+            retry_count += 1
+            if retry_count <= MAX_RETRIES:
+                # Use exponential backoff for retries
+                sleep_time = BACKOFF_FACTOR ** retry_count
+                info(f"⚠️  API request failed, retrying in {sleep_time:.1f}s ({retry_count}/{MAX_RETRIES}): {e}")
+                time.sleep(sleep_time)
+                # Continue with the current URL (retry)
+                continue
+            else:
+                # Log the error and break out of the pagination loop
+                info(f"⚠️  API request failed after {MAX_RETRIES} retries: {e}")
+                break
 
 # ───────────── main
+def fetch_all_godaddy_domains() -> List[str]:
+    """Fetch all domains from GoDaddy across all pages"""
+    info("📥 Fetching all GoDaddy domains across all pages...")
+    all_domains: List[str] = []
+    domains_seen = set()  # Track domains we've seen to prevent duplicates
+    
+    # First, check if the API is accessible
+    session.get("https://api.godaddy.com/v1/domains",
+                headers=GD_HEADERS,
+                params={"limit":1},
+                timeout=REQUEST_TIMEOUT).raise_for_status()
+    
+    # Use marker-based pagination which is more reliable than page numbers
+    marker = None
+    page_num = 1
+    while True:
+        # Set up params with marker if we have one
+        params = {
+            "limit": 1000,  # Fetch more domains per request
+            "statuses": "ACTIVE"
+        }
+        if marker:
+            params["marker"] = marker
+        
+        domain_batch = []
+        new_marker = None
+        for pg in paginate("https://api.godaddy.com/v1/domains", GD_HEADERS, 
+                          f"domains (page {page_num})", params=params):
+            # Check for pagination marker in response
+            if isinstance(pg, dict) and "_metadata" in pg and "nextMarker" in pg["_metadata"]:
+                new_marker = pg["_metadata"]["nextMarker"]
+                domain_data = pg.get("domains", [])
+            else:
+                domain_data = cast(List[GodaddyDomainRecord], pg)
+            
+            # Filter out test domains and already seen domains
+            for d in domain_data:
+                domain = d.get("domain", None) if isinstance(d, dict) else None
+                if domain and not is_test_domain(domain) and domain not in domains_seen:
+                    domains_seen.add(domain)
+                    domain_batch.append(domain)
+        
+        # If we got new domains, add them
+        if domain_batch:
+            info(f"  ➡ Page {page_num}: Found {len(domain_batch)} new domains")
+            all_domains.extend(domain_batch)
+            page_num += 1
+            
+            # If we have a new marker, continue; otherwise we're done
+            if new_marker and new_marker != marker:
+                marker = new_marker
+            else:
+                # No new marker or same marker, we're done
+                break
+        else:
+            # No new domains, we're done
+            break
+    
+    info(f"  ✓ Total: {len(all_domains)} domains")
+    return all_domains
+
+def fetch_dns_records_for_domain(dom: str) -> List[DNSRecord]:
+    """Fetch all DNS records for a single domain with pagination"""
+    domain_records: List[DNSRecord] = []
+    dns_url = f"https://api.godaddy.com/v1/domains/{quote_plus(dom)}/records"
+    
+    try:
+        # Use only the batched approach with offset which is more reliable
+        offset = 0
+        max_limit = 100  # Reasonable batch size (GoDaddy's API has issues with large limits)
+        all_records = []
+        page_num = 1
+        
+        info(f"📄 Fetching DNS records for {dom} with pagination...")
+        while True:
+            params = {"limit": max_limit, "offset": offset}
+            batch_records = []
+            batch_success = False
+            
+            try:
+                for pg in paginate(dns_url, GD_HEADERS, f"{dom} (page {page_num}, offset {offset})", params=params):
+                    dns_records = cast(List[GodaddyDNSRecord], pg)
+                    batch_records.extend(dns_records)
+                    batch_success = True
+            except RequestException as e:
+                # If we hit an error, try with a smaller limit
+                if max_limit > 25 and "422" in str(e):
+                    info(f"  ⚠️ Reducing batch size for {dom} due to API error")
+                    max_limit = 25  # Try with a smaller limit
+                    continue  # Retry this batch with smaller limit
+                else:
+                    # If we still have errors or it's not a 422, log and continue
+                    info(f"  ⚠️ Error fetching records for {dom} at offset {offset}: {e}")
+                    # Try next batch anyway
+            
+            # If successful, add batch to all records
+            if batch_success and batch_records:
+                info(f"  ℹ️ {dom}: Got {len(batch_records)} records at offset {offset}")
+                all_records.extend(batch_records)
+                
+                # If we got fewer records than the limit, we're done
+                if len(batch_records) < max_limit:
+                    break
+                    
+                # Otherwise, move to the next batch
+                offset += max_limit
+                page_num += 1
+            else:
+                # No records in this batch or error
+                break
+        
+        # Report total records found
+        if all_records:
+            info(f"  ✓ Got {len(all_records)} total records for {dom}")
+        else:
+            info(f"  ⚠️ No DNS records found for {dom}")
+        
+        # Convert all records to our standard format
+        for r in all_records:
+            domain_records.append(cast(DNSRecord, {
+                "domain": dom,
+                "subdomain": "" if r["name"] == "@" else r["name"],
+                "type":      r["type"],
+                "data":      r["data"],
+                "source":    "GoDaddy",
+                "discovery_date": TODAY,
+                "status":    "active"
+            }))
+            
+    except RequestException as e:
+        info(f"⚠️  Error fetching records for {dom}: {e}")
+    
+    return domain_records
+
 def main() -> tuple[List[DNSRecord], bool, bool]:
     recs: List[DNSRecord] = []
     gd_ok = cf_ok = False
@@ -149,33 +329,21 @@ def main() -> tuple[List[DNSRecord], bool, bool]:
     if args.godaddy:
         info("🔗 Checking GoDaddy …")
         try:
-            session.get("https://api.godaddy.com/v1/domains",
-                        headers=GD_HEADERS,
-                        params={"limit":1}).raise_for_status()
+            # Step 1: Fetch all domains first
+            all_domains = fetch_all_godaddy_domains()
             gd_ok = True
-            info("📥 GoDaddy domains …")
-            doms: List[str] = []
-            for pg in paginate("https://api.godaddy.com/v1/domains",
-                               GD_HEADERS, "domains", params={"limit":100}):
-                domain_data = cast(List[GodaddyDomainRecord], pg)
-                doms.extend(d["domain"] for d in domain_data)
-            info(f"➡  {len(doms)} domains")
-            for i, dom in enumerate(doms, 1):
-                log(f"  ↳ {i}/{len(doms)} {dom}")
-                for pg in paginate(f"https://api.godaddy.com/v1/domains/"
-                                   f"{quote_plus(dom)}/records",
-                                   GD_HEADERS, dom):
-                    dns_records = cast(List[GodaddyDNSRecord], pg)
-                    for r in dns_records:
-                        recs.append(cast(DNSRecord, {
-                            "domain": dom,
-                            "subdomain": "" if r["name"] == "@" else r["name"],
-                            "type":      r["type"],
-                            "data":      r["data"],
-                            "source":    "GoDaddy",
-                            "discovery_date": TODAY,
-                            "status":    "active"
-                        }))
+            
+            # Step 2: Fetch DNS records for each domain
+            total_domains = len(all_domains)
+            for i, dom in enumerate(all_domains, 1):
+                log(f"  ↳ Processing {i}/{total_domains}: {dom}")
+                try:
+                    domain_records = fetch_dns_records_for_domain(dom)
+                    recs.extend(domain_records)
+                except Exception as e:
+                    info(f"  ⛔ Failed to process domain {dom}: {e}")
+                    # Continue with next domain
+                
             info(f"✔ GoDaddy records: {sum(r['source']=='GoDaddy' for r in recs)}")
         except RequestException as e:
             info(f"⚠️  GoDaddy unreachable: {e}")
@@ -185,7 +353,8 @@ def main() -> tuple[List[DNSRecord], bool, bool]:
         info("\n🔗 Checking Cloudflare …")
         try:
             session.get("https://api.cloudflare.com/client/v4/user/tokens/verify",
-                        headers=CF_HEADERS).raise_for_status()
+                        headers=CF_HEADERS,
+                        timeout=REQUEST_TIMEOUT).raise_for_status()
             cf_ok = True
             info("📥 Cloudflare zones …")
             zones: List[CloudflareZone] = []
