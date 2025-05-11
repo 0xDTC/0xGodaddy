@@ -6,7 +6,6 @@
 *.csv
 *.pdf
 *.sh
-*.py
 *.bash
 *.zip
 *.key
