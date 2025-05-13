@@ -250,73 +250,70 @@ def fetch_dns_records_for_domain(dom: str) -> List[DNSRecord]:
     """Fetch all DNS records for a single domain with pagination"""
     domain_records: List[DNSRecord] = []
     dns_url = f"https://api.godaddy.com/v1/domains/{quote_plus(dom)}/records"
+
+    offset = 0
+    LIMIT = 100
+    page_num = 1
+    quota_exceeded = False
+
+    info(f"📄 Fetching DNS records for {dom} (limit {LIMIT})…")
     
-    try:
-        # Use only the batched approach with offset which is more reliable
-        offset = 0
-        max_limit = 100  # Reasonable batch size (GoDaddy's API has issues with large limits)
-        all_records = []
-        page_num = 1
-        
-        info(f"📄 Fetching DNS records for {dom} with pagination...")
-        while True:
-            params = {"limit": max_limit, "offset": offset}
-            batch_records = []
-            batch_success = False
-            
-            try:
-                for pg in paginate(dns_url, GD_HEADERS, f"{dom} (page {page_num}, offset {offset})", params=params):
-                    dns_records = cast(List[GodaddyDNSRecord], pg)
-                    batch_records.extend(dns_records)
-                    batch_success = True
-            except RequestException as e:
-                # If we hit an error, try with a smaller limit
-                if max_limit > 25 and "422" in str(e):
-                    info(f"  ⚠️ Reducing batch size for {dom} due to API error")
-                    max_limit = 25  # Try with a smaller limit
-                    continue  # Retry this batch with smaller limit
-                else:
-                    # If we still have errors or it's not a 422, log and continue
-                    info(f"  ⚠️ Error fetching records for {dom} at offset {offset}: {e}")
-                    # Try next batch anyway
-            
-            # If successful, add batch to all records
-            if batch_success and batch_records:
-                info(f"  ℹ️ {dom}: Got {len(batch_records)} records at offset {offset}")
-                all_records.extend(batch_records)
-                
-                # If we got fewer records than the limit, we're done
-                if len(batch_records) < max_limit:
-                    break
-                    
-                # Otherwise, move to the next batch
-                offset += max_limit
-                page_num += 1
-            else:
-                # No records in this batch or error
+    while True:
+        params = {"limit": LIMIT, "offset": offset}
+        try:
+            with spin():
+                resp = session.get(dns_url, headers=GD_HEADERS, params=params, timeout=REQUEST_TIMEOUT)
+            if resp.status_code == 429 or "TOO_MANY_REQUESTS" in resp.text:
+                info(f"⏳ Rate-limited for {dom}, sleeping 30 s…")
+                time.sleep(30)
+                continue  # retry same offset
+
+            if "QUOTA_EXCEEDED" in resp.text:
+                info("⛔ GoDaddy quota exceeded while fetching records – aborting further GoDaddy calls")
+                quota_exceeded = True
                 break
-        
-        # Report total records found
-        if all_records:
-            info(f"  ✓ Got {len(all_records)} total records for {dom}")
-        else:
-            info(f"  ⚠️ No DNS records found for {dom}")
-        
-        # Convert all records to our standard format
-        for r in all_records:
-            domain_records.append(cast(DNSRecord, {
-                "domain": dom,
-                "subdomain": "" if r["name"] == "@" else r["name"],
-                "type":      r["type"],
-                "data":      r["data"],
-                "source":    "GoDaddy",
-                "discovery_date": TODAY,
-                "status":    "active"
-            }))
-            
-    except RequestException as e:
-        info(f"⚠️  Error fetching records for {dom}: {e}")
-    
+
+            if resp.status_code == 404:
+                info(f"⚠️  Domain {dom} not found in GoDaddy")
+                break
+
+            resp.raise_for_status()
+            page_records = resp.json()
+            if not isinstance(page_records, list):
+                info(f"⚠️  Unexpected response for {dom} offset {offset}: not a list")
+                break
+
+            if not page_records:
+                # no more records
+                break
+
+            info(f"  ℹ️ {dom}: got {len(page_records)} records at offset {offset}")
+
+            for r in page_records:
+                domain_records.append(cast(DNSRecord, {
+                    "domain": dom,
+                    "subdomain": "" if r.get("name", "@") == "@" else r.get("name", ""),
+                    "type":      r.get("type", ""),
+                    "data":      r.get("data", ""),
+                    "source":    "GoDaddy",
+                    "discovery_date": TODAY,
+                    "status":    "active",
+                }))
+
+            if len(page_records) < LIMIT:
+                break  # finished
+
+            offset += LIMIT
+            page_num += 1
+
+        except RequestException as e:
+            info(f"⚠️  Error fetching {dom} offset {offset}: {e}")
+            break
+
+    if quota_exceeded:
+        raise RequestException("GoDaddy quota exceeded")
+
+    info(f"  ✓ {dom}: total {len(domain_records)} records")
     return domain_records
 
 def main() -> tuple[List[DNSRecord], bool, bool]:
