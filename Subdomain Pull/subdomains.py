@@ -199,52 +199,50 @@ def fetch_all_godaddy_domains() -> List[str]:
                 params={"limit":1},
                 timeout=REQUEST_TIMEOUT).raise_for_status()
     
-    # Use marker-based pagination which is more reliable than page numbers
-    marker = None
+    # Simple marker-based pagination, mirroring Bash GDomains script
+    PAGE_SIZE = 1000
+    marker: Optional[str] = None  # Last domain of previous batch
     page_num = 1
     while True:
-        # Set up params with marker if we have one
-        params = {
-            "limit": 1000,  # Fetch more domains per request
-            "statuses": "ACTIVE"
-        }
+        params: dict[str, Any] = {"limit": PAGE_SIZE}
         if marker:
             params["marker"] = marker
         
-        domain_batch = []
-        new_marker = None
-        for pg in paginate("https://api.godaddy.com/v1/domains", GD_HEADERS, 
-                          f"domains (page {page_num})", params=params):
-            # Check for pagination marker in response
-            if isinstance(pg, dict) and "_metadata" in pg and "nextMarker" in pg["_metadata"]:
-                new_marker = pg["_metadata"]["nextMarker"]
-                domain_data = pg.get("domains", [])
-            else:
-                domain_data = cast(List[GodaddyDomainRecord], pg)
-            
-            # Filter out test domains and already seen domains
-            for d in domain_data:
-                domain = d.get("domain", None) if isinstance(d, dict) else None
-                if domain and not is_test_domain(domain) and domain not in domains_seen:
-                    domains_seen.add(domain)
-                    domain_batch.append(domain)
-        
-        # If we got new domains, add them
-        if domain_batch:
-            info(f"  ➡ Page {page_num}: Found {len(domain_batch)} new domains")
-            all_domains.extend(domain_batch)
-            page_num += 1
-            
-            # If we have a new marker, continue; otherwise we're done
-            if new_marker and new_marker != marker:
-                marker = new_marker
-            else:
-                # No new marker or same marker, we're done
-                break
-        else:
-            # No new domains, we're done
+        batch_domains: list[str] = []
+        # Fetch a single page; paginate helper may still yield list/dict formats
+        try:
+            for pg in paginate(
+                "https://api.godaddy.com/v1/domains",
+                GD_HEADERS,
+                f"domains (page {page_num})",
+                params=params,
+            ):
+                if isinstance(pg, dict) and "domains" in pg and isinstance(pg["domains"], list):
+                    domain_data = pg["domains"]
+                else:
+                    domain_data = cast(List[GodaddyDomainRecord], pg)
+                for d in domain_data:
+                    dom = d.get("domain", None) if isinstance(d, dict) else None
+                    if dom and not is_test_domain(dom) and dom not in domains_seen:
+                        domains_seen.add(dom)
+                        batch_domains.append(dom)
+        except RequestException as e:
+            info(f"⚠️  Error fetching domain page {page_num}: {e}")
             break
-    
+
+        if not batch_domains:
+            break  # nothing new, done
+
+        info(f"  ➡ Page {page_num}: Found {len(batch_domains)} new domains")
+        all_domains.extend(batch_domains)
+        # If fewer than PAGE_SIZE, we've reached the end
+        if len(batch_domains) < PAGE_SIZE:
+            break
+
+        # prepare for next loop: marker = last domain of current batch
+        marker = batch_domains[-1]
+        page_num += 1
+ 
     info(f"  ✓ Total: {len(all_domains)} domains")
     return all_domains
 
