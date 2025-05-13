@@ -388,16 +388,26 @@ def main() -> tuple[List[DNSRecord], bool, bool]:
         except json.JSONDecodeError:
             info(f"⚠️  {MASTER_JSON.name} is corrupt – starting fresh")
 
-    now_map: Dict[str, DNSRecord] = {sig(r): r for r in recs}   # new run first
+    # Start with latest run's records
+    now_map: Dict[str, DNSRecord] = {sig(r): r for r in recs}
+
+    # Merge with history to (a) mark removed records and (b) preserve first discovery_date
     for old in previous:
-        s = sig(old)
-        if s in now_map:            # new copy wins → keep its status
+        key = sig(old)
+        if key in now_map:
+            # Record still exists – ensure we keep original discovery date
+            orig_date = old.get("discovery_date", TODAY)
+            now_map[key]["discovery_date"] = orig_date
+            # If the old record had been previously removed but is back, restore active status
+            # (the new record already has correct status)
             continue
+
+        # Record not present in this run → mark removed if source checked
         src = old["source"]
-        checked = (src=="GoDaddy" and gd_ok) or (src=="Cloudflare" and cf_ok)
+        checked = (src == "GoDaddy" and gd_ok) or (src == "Cloudflare" and cf_ok)
         if checked:
             old["status"] = "removed"
-        now_map[s] = old            # keep old (active or removed)
+        now_map[key] = old  # keep historical record (active/removed)
 
     merged = sorted(now_map.values(), key=lambda r: (r["domain"], r["subdomain"]))
     MASTER_JSON.write_text(json.dumps(merged, indent=2))
